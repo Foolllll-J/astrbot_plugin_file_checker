@@ -1,6 +1,6 @@
 name: astrbot_plugin_file_checker
 display_name: File Checker
 desc: 用于QQ群文件失效检查(仅限napcat)
-version: v1.4
+version: v1.5
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_file_checker

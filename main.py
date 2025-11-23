@@ -7,10 +7,9 @@ import subprocess
 import re
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain, MessageEventResult
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.api.message_components import Reply, Plain, Node, Nodes, File
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
@@ -18,7 +17,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件失效检查",
-    "1.4",
+    "1.5",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -32,12 +31,17 @@ class GroupFileCheckerPlugin(Star):
         self.check_delay_seconds: int = self.config.get("check_delay_seconds", 300)
         self.preview_length: int = self.config.get("preview_length", 200)
         self.forward_threshold: int = self.config.get("forward_threshold", 300)
+        self.enable_duplicate_check: bool = self.config.get("enable_duplicate_check", False)
         self.enable_zip_preview: bool = self.config.get("enable_zip_preview", True)
         self.zip_extraction_size_limit_mb: int = self.config.get("zip_extraction_size_limit_mb", 100)
         self.default_zip_password: str = self.config.get("default_zip_password", "")
-        self.enable_repack_on_failure: bool = self.config.get("enable_repack_on_failure", False)
+        repack_extensions_str: str = self.config.get("repack_file_extensions", "")
+        self.repack_file_extensions: List[str] = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
         self.repack_zip_password: str = self.config.get("repack_zip_password", "")
-        self.enable_duplicate_check: bool = self.config.get("enable_duplicate_check", False)
+        self.file_size_threshold_mb: int = self.config.get("file_size_threshold_mb", 100)
+        
+        self.temp_dir = os.path.join(StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp")
+        os.makedirs(self.temp_dir, exist_ok=True)
         
         self.download_semaphore = asyncio.Semaphore(5)
         logger.info("插件 [群文件失效检查] 已加载。")
@@ -182,10 +186,15 @@ class GroupFileCheckerPlugin(Star):
                             file_size = None
 
                     if file_name and file_id:
-                        logger.info(f"【原始方式】成功解析: 文件名='{file_name}', ID='{file_id}'")
+                        if file_size is not None and self.file_size_threshold_mb > 0:
+                            file_size_mb = file_size / (1024 * 1024)
+                            if file_size_mb > self.file_size_threshold_mb:
+                                logger.info(f"[{group_id}] 文件 '{file_name}' 大小 ({file_size_mb:.2f} MB) 超过处理阈值 ({self.file_size_threshold_mb} MB)，跳过所有处理。")
+                                return
+                        logger.info(f"成功解析: 文件名='{file_name}', ID='{file_id}'")
                         file_component = self._find_file_component(event)
                         if not file_component:
-                            logger.error("致命错误：无法在高级组件中找到对应的File对象！")
+                            logger.error("致命错误：无法在组件中找到对应的File对象！")
                             return
                         
                         if self.enable_duplicate_check and file_size is not None:
@@ -215,7 +224,7 @@ class GroupFileCheckerPlugin(Star):
                                     await self._send_or_forward(event, reply_text, event.message_obj.message_id)
                                 break
 
-                        await self._handle_file_check_flow(event, file_name, file_id, file_component)
+                        await self._handle_file_check_flow(event, file_name, file_id, file_component, file_size)
                         break
         except Exception as e:
             logger.error(f"【原始方式】处理消息时发生致命错误: {e}", exc_info=True)
@@ -259,9 +268,6 @@ class GroupFileCheckerPlugin(Star):
             await event.send(MessageChain([Plain("❌ 文件名包含不安全字符，已跳过重新打包。")]))
             return
         
-        temp_dir = os.path.join(get_astrbot_data_path(), "plugins_data", "file_checker", "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        
         repacked_file_path = None
         original_txt_path = None
         renamed_txt_path = None
@@ -270,14 +276,14 @@ class GroupFileCheckerPlugin(Star):
             
             original_txt_path = await file_component.get_file()
             
-            renamed_txt_path = os.path.join(temp_dir, original_filename)
+            renamed_txt_path = os.path.join(self.temp_dir, original_filename)
             if os.path.exists(renamed_txt_path):
                 os.remove(renamed_txt_path)
             os.rename(original_txt_path, renamed_txt_path)
 
             base_name = os.path.splitext(original_filename)[0]
             new_zip_name = f"{base_name}.zip"
-            repacked_file_path = os.path.join(temp_dir, f"{int(time.time())}_{new_zip_name}")
+            repacked_file_path = os.path.join(self.temp_dir, f"{int(time.time())}_{new_zip_name}")
 
             command = ['zip', '-j', repacked_file_path, renamed_txt_path]
             if self.repack_zip_password:
@@ -340,7 +346,7 @@ class GroupFileCheckerPlugin(Star):
                 except OSError as e:
                     logger.warning(f"删除临时文件 {renamed_txt_path} 失败: {e}")
     
-    async def _handle_file_check_flow(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File):
+    async def _handle_file_check_flow(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: Optional[int] = None):
         group_id = int(event.get_group_id())
         message_id = event.message_obj.message_id
         
@@ -355,15 +361,22 @@ class GroupFileCheckerPlugin(Star):
 
         is_gfs_valid = await self._check_validity_via_gfs(event, file_id)
 
-        preview_text, preview_extra_info = await self._get_preview_for_file(file_name, file_component)
+        preview_text, preview_extra_info = await self._get_preview_for_file(file_name, file_component, file_size)
 
         if is_gfs_valid:
             if self.notify_on_success:
                 success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
                 if preview_text:
-                    preview_text_short = preview_text[:self.preview_length]
+                    # 文件结构列表不截断，普通文本预览才截断
+                    is_file_structure = preview_extra_info == "文件结构"
+                    if is_file_structure:
+                        preview_text_short = preview_text
+                    else:
+                        preview_text_short = preview_text[:self.preview_length]
+                    
                     success_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
-                    if len(preview_text) > self.preview_length: success_message += "..."
+                    if not is_file_structure and len(preview_text) > self.preview_length:
+                        success_message += "..."
                 await self._send_or_forward(event, success_message, message_id)
             logger.info(f"[{group_id}] 初步检查通过，已加入延时复核队列。")
             asyncio.create_task(self._task_delayed_recheck(event, file_name, file_id, file_component, preview_text))
@@ -372,15 +385,23 @@ class GroupFileCheckerPlugin(Star):
             try:
                 failure_message = f"⚠️ 您发送的文件「{file_name}」已失效。"
                 if preview_text:
-                    preview_text_short = preview_text[:self.preview_length]
+                    # 文件结构列表不截断，普通文本预览才截断
+                    is_file_structure = preview_extra_info == "文件结构"
+                    if is_file_structure:
+                        preview_text_short = preview_text
+                    else:
+                        preview_text_short = preview_text[:self.preview_length]
+                    
                     failure_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
-                    if len(preview_text) > self.preview_length: failure_message += "..."
+                    if not is_file_structure and len(preview_text) > self.preview_length:
+                        failure_message += "..."
                 await self._send_or_forward(event, failure_message, message_id)
 
-                is_txt = file_name.lower().endswith('.txt')
-                if self.enable_repack_on_failure and is_txt and preview_text:
-                    logger.info("文件即时检查失效但内容可读，触发重新打包任务...")
-                    await self._repack_and_send_txt(event, file_name, file_component)
+                if self.repack_file_extensions and preview_text:
+                    file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
+                    if file_ext in self.repack_file_extensions:
+                        logger.info(f"文件即时检查失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
+                        await self._repack_and_send_txt(event, file_name, file_component)
                 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段一] 回复失效通知时再次发生错误: {send_e}")
@@ -414,13 +435,8 @@ class GroupFileCheckerPlugin(Star):
             return "", "未知"
             
     async def _get_preview_from_zip(self, file_path: str) -> tuple[str, str]:
-        temp_dir = os.path.join(get_astrbot_data_path(), "plugins_data", "file_checker", "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        extract_path = os.path.join(temp_dir, f"extract_{int(time.time())}")
+        extract_path = os.path.join(self.temp_dir, f"extract_{int(time.time())}")
         os.makedirs(extract_path, exist_ok=True)
-        
-        extracted_txt_path = None
         
         try:
             logger.info("正在尝试无密码解压...")
@@ -452,20 +468,55 @@ class GroupFileCheckerPlugin(Star):
                     logger.error(f"使用 7za 命令解压失败且未设置默认密码: {error_message}")
                     return "", "解压失败"
 
-            all_extracted_files = os.listdir(extract_path)
+            all_extracted_files = []
+            for root, dirs, files in os.walk(extract_path):
+                for f in files:
+                    full_path = os.path.join(root, f)
+                    all_extracted_files.append(full_path)
+            
             txt_files = [f for f in all_extracted_files if f.lower().endswith('.txt')]
             
             if not txt_files:
-                return "", "无法找到 .txt 文件"
+                # 如果没有找到txt文件，输出压缩包的文件结构
+                if not all_extracted_files:
+                    return "", "压缩包为空或解压失败"
+                
+                # 构建文件结构树
+                file_structure = ["📦 压缩包内文件结构："]
+                for f_path in sorted(all_extracted_files):
+                    relative_path = os.path.relpath(f_path, extract_path)
+                    try:
+                        file_size = os.path.getsize(f_path)
+                        # 格式化文件大小
+                        if file_size < 1024:
+                            size_str = f"{file_size} B"
+                        elif file_size < 1024 * 1024:
+                            size_str = f"{file_size / 1024:.2f} KB"
+                        elif file_size < 1024 * 1024 * 1024:
+                            size_str = f"{file_size / (1024 * 1024):.2f} MB"
+                        else:
+                            size_str = f"{file_size / (1024 * 1024 * 1024):.2f} GB"
+                        
+                        # 计算缩进层级
+                        depth = relative_path.count(os.sep)
+                        indent = "  " * depth
+                        file_name_only = os.path.basename(relative_path)
+                        file_structure.append(f"{indent}├─ {file_name_only} ({size_str})")
+                    except Exception as e:
+                        logger.warning(f"获取文件 {relative_path} 信息失败: {e}")
+                        continue
+                
+                structure_text = "\n".join(file_structure)
+                return structure_text, "文件结构"
                 
             first_txt_file = txt_files[0]
             safe_txt_name = os.path.basename(first_txt_file)
             
             if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', safe_txt_name):
-                logger.error(f"解压出的文件名 '{first_txt_file}' 包含非安全字符，跳过预览。")
+                logger.error(f"解压出的文件名 '{safe_txt_name}' 包含非安全字符，跳过预览。")
                 return "", "解压出的文件名不安全"
 
-            extracted_txt_path = os.path.join(extract_path, first_txt_file)
+            extracted_txt_path = first_txt_file  # 已经是完整路径了
             
             with open(extracted_txt_path, 'rb') as f:
                 content_bytes = f.read(self.preview_length * 4)
@@ -482,27 +533,34 @@ class GroupFileCheckerPlugin(Star):
             return "", "未知错误"
         finally:
             if extract_path and os.path.exists(extract_path):
-                async def cleanup_folder(path: str):
-                    await asyncio.sleep(5)
-                    try:
-                        for item in os.listdir(path):
-                            item_path = os.path.join(path, item)
-                            if os.path.isfile(item_path):
-                                os.remove(item_path)
-                        os.rmdir(path)
-                        logger.info(f"已清理临时文件夹: {path}")
-                    except OSError as e:
-                        logger.warning(f"删除临时文件夹 {path} 失败: {e}")
-                
-                asyncio.create_task(cleanup_folder(extract_path))
+                try:
+                    for root, dirs, files in os.walk(extract_path, topdown=False):
+                        for name in files:
+                            os.remove(os.path.join(root, name))
+                        for name in dirs:
+                            os.rmdir(os.path.join(root, name))
+                    os.rmdir(extract_path)
+                    logger.info(f"已清理临时文件夹: {extract_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
 
-    async def _get_preview_for_file(self, file_name: str, file_component: Comp.File) -> tuple[str, str]:
+    async def _get_preview_for_file(self, file_name: str, file_component: Comp.File, file_size: Optional[int] = None) -> tuple[str, str]:
         is_txt = file_name.lower().endswith('.txt')
         is_zip = self.enable_zip_preview and file_name.lower().endswith('.zip')
+        
+        if not (is_txt or is_zip):
+            return "", ""
+        
+        if is_zip and file_size is not None:
+            zip_size_mb = file_size / (1024 * 1024)
+            limit_mb = self.zip_extraction_size_limit_mb
+            
+            if limit_mb > 0 and zip_size_mb > limit_mb:
+                logger.info(f"ZIP文件大小 ({zip_size_mb:.2f} MB) 超过配置的上限 ({limit_mb} MB)，跳过下载和解压预览。")
+                return "", "文件过大，跳过解压"
+        
         local_file_path = None
         try:
-            if not (is_txt or is_zip):
-                return "", ""
             async with self.download_semaphore:
                 local_file_path = await file_component.get_file()
             if is_txt:
@@ -512,13 +570,6 @@ class GroupFileCheckerPlugin(Star):
                 extra_info = f"格式为 {encoding}"
                 return preview_text, extra_info
             if is_zip:
-                zip_size_bytes = os.path.getsize(local_file_path)
-                zip_size_mb = zip_size_bytes / (1024 * 1024)
-                limit_mb = self.zip_extraction_size_limit_mb
-
-                if limit_mb > 0 and zip_size_mb > limit_mb:
-                    logger.info(f"ZIP文件大小 ({zip_size_mb:.2f} MB) 超过配置的上限 ({limit_mb} MB)，跳过解压预览。")
-                    return "", "文件过大，跳过解压"
                 return await self._get_preview_from_zip(local_file_path)
         except Exception as e:
             logger.error(f"获取预览时下载或读取文件失败: {e}", exc_info=True)
@@ -543,10 +594,11 @@ class GroupFileCheckerPlugin(Star):
                 failure_message = f"❌ 经 {self.check_delay_seconds} 秒后复核，您发送的文件「{file_name}」已失效。"
                 await self._send_or_forward(event, failure_message, message_id)
                 
-                is_txt = file_name.lower().endswith('.txt')
-                if self.enable_repack_on_failure and is_txt and preview_text:
-                    logger.info("文件在延时复核时失效但内容可读，触发重新打包任务...")
-                    await self._repack_and_send_txt(event, file_name, file_component)
+                if self.repack_file_extensions and preview_text:
+                    file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
+                    if file_ext in self.repack_file_extensions:
+                        logger.info(f"文件在延时复核时失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
+                        await self._repack_and_send_txt(event, file_name, file_component)
 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")

@@ -59,16 +59,22 @@
         "type": "string",
         "default": ""
     },
-    "enable_repack_on_failure": {
-        "description": "为失效TXT重新打包发送",
-        "hint": "开启后，当TXT文件初步检查失效但机器人仍能下载时，会自动将其压缩为ZIP文件尝试发送。",
-        "type": "bool",
-        "default": false
+    "repack_file_extensions": {
+        "description": "支持的补档后缀",
+        "hint": "只有在列表中的文件类型才会在失效时自动打包发送。用逗号分隔，如: txt,pdf。留空表示不开启自动补档功能。",
+        "type": "text",
+        "default": ""
     },
     "repack_zip_password": {
         "description": "重新打包ZIP的加密密码",
         "hint": "为失效TXT重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
         "type": "string",
         "default": ""
+    },
+    "file_size_threshold_mb": {
+        "description": "文件处理大小阈值 (MB)",
+        "hint": "文件大小超过此值时，将完全跳过该文件的所有处理。设置为 0 则不限制。",
+        "type": "int",
+        "default": 100
     }
 }
