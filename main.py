@@ -17,7 +17,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件失效检查",
-    "1.5",
+    "1.6",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -39,6 +39,7 @@ class GroupFileCheckerPlugin(Star):
         self.repack_file_extensions: List[str] = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
         self.repack_zip_password: str = self.config.get("repack_zip_password", "")
         self.file_size_threshold_mb: int = self.config.get("file_size_threshold_mb", 100)
+        self.auto_convert_video_threshold_mb: int = self.config.get("auto_convert_video_threshold_mb", 0)
         
         self.temp_dir = os.path.join(StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -58,11 +59,100 @@ class GroupFileCheckerPlugin(Star):
         except (UnicodeEncodeError, UnicodeDecodeError):
             return filename
     
+    def _is_video_file(self, filename: str) -> bool:
+        """检测文件是否为视频格式（仅支持 mp4）"""
+        file_ext = os.path.splitext(filename)[1].lower()
+        return file_ext == '.mp4'
+    
+    async def _delete_group_file(self, event: AstrMessageEvent, file_id: str, file_name: str) -> bool:
+        """删除群文件"""
+        group_id = int(event.get_group_id())
+        try:
+            client = event.bot
+            delete_result = await client.api.call_action('delete_group_file', group_id=group_id, file_id=file_id)
+            
+            if delete_result and delete_result.get('transGroupFileResult', {}).get('result', {}).get('retCode') == 0:
+                logger.info(f"[{group_id}] ✅ 成功删除群文件: {file_name}")
+                return True
+            else:
+                logger.warning(f"[{group_id}] ⚠️ 删除群文件失败: {file_name}")
+                return False
+        except Exception as e:
+            logger.error(f"[{group_id}] ❌ 删除群文件时发生错误: {e}", exc_info=True)
+            return False
+    
+    async def _convert_file_to_video(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: int) -> bool:
+        """
+        将文件转换为视频形式发送
+        
+        Returns:
+            bool: True 表示转换成功；False 表示转换失败
+        """
+        group_id = int(event.get_group_id())
+        local_video_path = None
+        
+        try:
+            logger.info(f"[{group_id}] 🎬 开始视频转换流程: {file_name}")
+            
+            async with self.download_semaphore:
+                local_video_path = await file_component.get_file()
+            
+            if not local_video_path or not os.path.exists(local_video_path):
+                logger.error(f"[{group_id}] ❌ 下载视频文件失败")
+                return False
+            
+            file_size_mb = file_size / (1024 * 1024)
+            absolute_path = os.path.abspath(local_video_path)
+            
+            logger.info(f"[{group_id}] 📹 准备以视频形式发送文件 ({file_size_mb:.2f} MB): {absolute_path}")
+            
+            from astrbot.api.message_components import Video
+            video_message = MessageChain([Video(file=f"file:///{absolute_path}")])
+            await event.send(video_message)
+            
+            logger.info(f"[{group_id}] ✅ 视频发送成功，将在 30 分钟后删除群文件和本地缓存")
+            
+            # 30分钟后删除群文件和本地缓存
+            delete_delay = 1800  # 30分钟
+            asyncio.create_task(self._delayed_cleanup(event, file_name, local_video_path, delete_delay))
+            
+            return True  # 转换成功
+            
+        except Exception as e:
+            logger.error(f"[{group_id}] ❌ 视频发送失败: {e}", exc_info=True)
+            if local_video_path and os.path.exists(local_video_path):
+                try:
+                    os.remove(local_video_path)
+                    logger.info(f"[{group_id}] 🗑️ 已清理下载失败的本地视频缓存")
+                except OSError:
+                    pass
+            return False  # 发送失败
+    
+    async def _delayed_cleanup(self, event: AstrMessageEvent, file_name: str, local_path: str, delay: int):
+        """延迟清理群文件和本地文件"""
+        await asyncio.sleep(delay)
+        
+        group_id = int(event.get_group_id())
+        logger.info(f"[{group_id}] 开始延迟清理视频文件: {file_name}")
+        
+        # 通过文件名查询最新的 file_id
+        file_id = await self._search_file_id_by_name(event, file_name)
+        
+        if file_id:
+            await self._delete_group_file(event, file_id, file_name)
+        else:
+            logger.error(f"[{group_id}] ❌ 无法查询到文件ID，可能文件已被删除或移动")
+        
+        # 删除本地文件
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+                logger.info(f"[{group_id}] 🗑️ 已删除本地视频缓存: {os.path.basename(local_path)}")
+            except OSError as e:
+                logger.warning(f"[{group_id}] ⚠️ 删除本地视频缓存失败: {e}")
+    
     async def _search_file_id_by_name(self, event: AstrMessageEvent, file_name: str) -> Optional[str]:
         group_id = int(event.get_group_id())
-        self_id = event.get_self_id()
-        
-        logger.info(f"[{group_id}] 开始文件ID搜索：目标文件名='{file_name}'")
         
         try:
             client = event.bot
@@ -74,10 +164,11 @@ class GroupFileCheckerPlugin(Star):
             
             for file_info in file_list.get('files', []):
                 if file_info.get('file_name') == file_name:
-                    logger.info(f"[{group_id}] 成功匹配！文件ID: {file_info.get('file_id')}")
-                    return file_info.get('file_id')
+                    file_id = file_info.get('file_id')
+                    logger.info(f"[{group_id}] 查询到文件 '{file_name}' 的 file_id: {file_id}")
+                    return file_id
             
-            logger.info(f"[{group_id}] 未找到匹配文件。")
+            logger.warning(f"[{group_id}] 未找到文件 '{file_name}'")
             return None
         except Exception as e:
             logger.error(f"[{group_id}] 通过文件名搜索文件ID时出错: {e}", exc_info=True)
@@ -224,6 +315,12 @@ class GroupFileCheckerPlugin(Star):
                                     await self._send_or_forward(event, reply_text, event.message_obj.message_id)
                                 break
 
+                        if self.auto_convert_video_threshold_mb > 0 and file_size is not None:
+                            if self._is_video_file(file_name):
+                                file_size_mb = file_size / (1024 * 1024)
+                                if file_size_mb > self.auto_convert_video_threshold_mb:
+                                    logger.info(f"[{group_id}] 视频文件 '{file_name}' ({file_size_mb:.2f} MB) 超过转换阈值 ({self.auto_convert_video_threshold_mb} MB)，跳过自动转换")
+
                         await self._handle_file_check_flow(event, file_name, file_id, file_component, file_size)
                         break
         except Exception as e:
@@ -318,7 +415,7 @@ class GroupFileCheckerPlugin(Star):
             
             if new_file_id:
                 logger.info(f"新文件发送成功，ID为 {new_file_id}，已加入延时复核队列。")
-                asyncio.create_task(self._task_delayed_recheck(event, new_zip_name, new_file_id, file_component, None))
+                asyncio.create_task(self._task_delayed_recheck(event, new_zip_name, new_file_id, None, None))
             else:
                 logger.error("未能获取新文件的ID，无法进行延时复核。")
             
@@ -364,6 +461,19 @@ class GroupFileCheckerPlugin(Star):
         preview_text, preview_extra_info = await self._get_preview_for_file(file_name, file_component, file_size)
 
         if is_gfs_valid:
+            # 文件有效，检查是否需要视频转换
+            should_convert_video = (
+                self.auto_convert_video_threshold_mb > 0 
+                and file_size is not None 
+                and self._is_video_file(file_name)
+                and (file_size / (1024 * 1024)) <= self.auto_convert_video_threshold_mb
+            )
+            
+            if should_convert_video:
+                logger.info(f"[{group_id}] 🎬 文件有效，符合视频转换条件，尝试转换")
+                # 尝试转换，不管成功与否都继续正常流程
+                await self._convert_file_to_video(event, file_name, file_id, file_component, file_size)
+            
             if self.notify_on_success:
                 success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
                 if preview_text:
@@ -402,6 +512,14 @@ class GroupFileCheckerPlugin(Star):
                     if file_ext in self.repack_file_extensions:
                         logger.info(f"文件即时检查失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
                         await self._repack_and_send_txt(event, file_name, file_component)
+                        # 补档后删除已失效的原文件
+                        logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
+                        # 重新查询文件ID以确保准确删除
+                        current_file_id = await self._search_file_id_by_name(event, file_name)
+                        if current_file_id:
+                            await self._delete_group_file(event, current_file_id, file_name)
+                        else:
+                            logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
                 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段一] 回复失效通知时再次发生错误: {send_e}")
@@ -583,22 +701,37 @@ class GroupFileCheckerPlugin(Star):
         return "", ""
 
     async def _task_delayed_recheck(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, preview_text: str):
+        """延时复核任务"""
         await asyncio.sleep(self.check_delay_seconds)
         group_id = int(event.get_group_id())
         message_id = event.message_obj.message_id
+        
         logger.info(f"[{group_id}] [阶段二] 开始延时复核: '{file_name}'")
+        
         is_still_valid = await self._check_validity_via_gfs(event, file_id)
+        
         if not is_still_valid:
             logger.error(f"❌ [{group_id}] [阶段二] 文件 '{file_name}' 在延时复核时确认已失效!")
             try:
                 failure_message = f"❌ 经 {self.check_delay_seconds} 秒后复核，您发送的文件「{file_name}」已失效。"
                 await self._send_or_forward(event, failure_message, message_id)
                 
-                if self.repack_file_extensions and preview_text:
+                # 只有在 file_component 不为 None 且有 preview_text 时才尝试补档
+                if file_component and self.repack_file_extensions and preview_text:
                     file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
                     if file_ext in self.repack_file_extensions:
                         logger.info(f"文件在延时复核时失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
                         await self._repack_and_send_txt(event, file_name, file_component)
+                        # 补档后删除已失效的原文件
+                        logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
+                        # 重新查询文件ID以确保准确删除
+                        current_file_id = await self._search_file_id_by_name(event, file_name)
+                        if current_file_id:
+                            await self._delete_group_file(event, current_file_id, file_name)
+                        else:
+                            logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
+                elif not file_component:
+                    logger.info(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")
