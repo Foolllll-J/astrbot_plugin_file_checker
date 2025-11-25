@@ -640,7 +640,7 @@ class GroupFileCheckerPlugin(Star):
                 content_bytes = f.read(self.preview_length * 4)
             
             preview_text, encoding = self._get_preview_from_bytes(content_bytes)
-            extra_info = f"已解压「{first_txt_file}」(格式 {encoding})"
+            extra_info = f"已解压「{safe_txt_name}」(格式 {encoding})"
             return preview_text, extra_info
             
         except FileNotFoundError:
