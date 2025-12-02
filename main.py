@@ -165,7 +165,7 @@ class GroupFileCheckerPlugin(Star):
             for file_info in file_list.get('files', []):
                 if file_info.get('file_name') == file_name:
                     file_id = file_info.get('file_id')
-                    logger.info(f"[{group_id}] 查询到文件 '{file_name}' 的 file_id: {file_id}")
+                    logger.debug(f"[{group_id}] 查询到文件 '{file_name}' 的 file_id: {file_id}")
                     return file_id
             
             logger.warning(f"[{group_id}] 未找到文件 '{file_name}'")
@@ -206,14 +206,14 @@ class GroupFileCheckerPlugin(Star):
             except Exception as e:
                 logger.error(f"[{group_id}] 遍历文件夹 '{current_folder['folder_name']}' 时出错: {e}", exc_info=True)
         
-        logger.info(f"[{group_id}] 遍历完成，共找到 {len(all_files_dict)} 个文件。")
+        logger.debug(f"[{group_id}] 遍历完成，共找到 {len(all_files_dict)} 个文件。")
         
         possible_duplicates = []
         for file_info in all_files_dict.values():
             if file_info.get('file_size') == file_size:
                 possible_duplicates.append(file_info)
 
-        logger.info(f"[{group_id}] 共找到 {len(possible_duplicates)} 个大小匹配的候选项。")
+        logger.debug(f"[{group_id}] 共找到 {len(possible_duplicates)} 个大小匹配的候选项。")
         
         existing_files = []
         removed_files = []
@@ -232,7 +232,7 @@ class GroupFileCheckerPlugin(Star):
                 existing_files.append(f)
 
         if removed_files:
-            logger.info(f"[{group_id}] 已从候选项中排除自身文件，共 {len(removed_files)} 个。")
+            logger.debug(f"[{group_id}] 已从候选项中排除自身文件，共 {len(removed_files)} 个。")
         
         if existing_files:
             logger.info(f"[{group_id}] 最终确认 {len(existing_files)} 个真正的重复文件。")
@@ -282,7 +282,7 @@ class GroupFileCheckerPlugin(Star):
                             if file_size_mb > self.file_size_threshold_mb:
                                 logger.info(f"[{group_id}] 文件 '{file_name}' 大小 ({file_size_mb:.2f} MB) 超过处理阈值 ({self.file_size_threshold_mb} MB)，跳过所有处理。")
                                 return
-                        logger.info(f"成功解析: 文件名='{file_name}', ID='{file_id}'")
+                        logger.debug(f"成功解析: 文件名='{file_name}', ID='{file_id}'")
                         file_component = self._find_file_component(event)
                         if not file_component:
                             logger.error("致命错误：无法在组件中找到对应的File对象！")
@@ -290,7 +290,7 @@ class GroupFileCheckerPlugin(Star):
                         
                         if self.enable_duplicate_check and file_size is not None:
                             upload_time = raw_event_data.get("time", int(time.time()))
-                            logger.info(f"[{group_id}] 新上传文件时间戳: {upload_time} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_time))})")
+                            logger.debug(f"[{group_id}] 新上传文件时间戳: {upload_time} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_time))})")
 
                             existing_files = await self._check_if_file_exists_by_size(event, file_name, file_size, upload_time)
                             if existing_files:
@@ -336,7 +336,7 @@ class GroupFileCheckerPlugin(Star):
             await event.send(chain)
             return
         
-        logger.info(f"[{event.get_group_id()}] 检测到长消息，将自动合并转发。")
+        logger.debug(f"[{event.get_group_id()}] 检测到长消息，将自动合并转发。")
 
         try:
             split_texts = self._split_text_by_length(text, 4000)
@@ -358,7 +358,7 @@ class GroupFileCheckerPlugin(Star):
             chain = MessageChain([Reply(id=message_id), Plain(text=fallback_text)])
             await event.send(chain)
 
-    async def _repack_and_send_txt(self, event: AstrMessageEvent, original_filename: str, file_component: Comp.File):
+    async def _repack_and_send_file(self, event: AstrMessageEvent, original_filename: str, file_component: Comp.File):
         base_name = os.path.basename(original_filename)
         if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', base_name):
             logger.error(f"文件名 '{original_filename}' 包含非安全字符，已跳过重新打包。")
@@ -386,7 +386,7 @@ class GroupFileCheckerPlugin(Star):
             if self.repack_zip_password:
                 command.extend(['-P', self.repack_zip_password])
 
-            logger.info(f"正在执行打包命令: {' '.join(command)}")
+            logger.debug(f"正在执行打包命令: {' '.join(command)}")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=subprocess.PIPE,
@@ -507,11 +507,11 @@ class GroupFileCheckerPlugin(Star):
                         failure_message += "..."
                 await self._send_or_forward(event, failure_message, message_id)
 
-                if self.repack_file_extensions and preview_text:
+                if self.repack_file_extensions:
                     file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
                     if file_ext in self.repack_file_extensions:
-                        logger.info(f"文件即时检查失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
-                        await self._repack_and_send_txt(event, file_name, file_component)
+                        logger.info(f"文件即时检查失效，触发重新打包任务 (文件类型: {file_ext})...")
+                        await self._repack_and_send_file(event, file_name, file_component)
                         # 补档后删除已失效的原文件
                         logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
                         # 重新查询文件ID以确保准确删除
@@ -716,12 +716,12 @@ class GroupFileCheckerPlugin(Star):
                 failure_message = f"❌ 经 {self.check_delay_seconds} 秒后复核，您发送的文件「{file_name}」已失效。"
                 await self._send_or_forward(event, failure_message, message_id)
                 
-                # 只有在 file_component 不为 None 且有 preview_text 时才尝试补档
-                if file_component and self.repack_file_extensions and preview_text:
+                # 只有在 file_component 不为 None 时才尝试补档
+                if file_component and self.repack_file_extensions:
                     file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
                     if file_ext in self.repack_file_extensions:
-                        logger.info(f"文件在延时复核时失效但内容可读，触发重新打包任务 (文件类型: {file_ext})...")
-                        await self._repack_and_send_txt(event, file_name, file_component)
+                        logger.info(f"文件在延时复核时失效，触发重新打包任务 (文件类型: {file_ext})...")
+                        await self._repack_and_send_file(event, file_name, file_component)
                         # 补档后删除已失效的原文件
                         logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
                         # 重新查询文件ID以确保准确删除
