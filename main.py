@@ -17,7 +17,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件失效检查",
-    "1.6",
+    "1.7",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -35,11 +35,35 @@ class GroupFileCheckerPlugin(Star):
         self.enable_zip_preview: bool = self.config.get("enable_zip_preview", True)
         self.zip_extraction_size_limit_mb: int = self.config.get("zip_extraction_size_limit_mb", 100)
         self.default_zip_password: str = self.config.get("default_zip_password", "")
+        
+        # 7za 支持的压缩格式（不包括 RAR5）
+        self.supported_archive_formats = (
+            '.zip', '.7z', '.tar', '.gz', '.bz2', '.xz',
+            '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz',
+            '.iso', '.wim', '.rar'
+        )
+        
+        # 支持文本预览的文件格式
+        self.supported_text_formats = (
+            # 文档类
+            '.txt', '.md', '.log',
+            # 配置类
+            '.json', '.xml', '.yaml', '.yml', '.ini', '.conf', '.cfg', '.toml',
+            # 代码类
+            '.py', '.js', '.java', '.c', '.cpp', '.h', '.go', '.rs', '.php', '.rb', '.sh', '.bash',
+            '.html', '.htm', '.css', '.jsx', '.tsx', '.ts', '.vue', '.sql',
+            # 数据类
+            '.csv', '.properties', '.env'
+        )
         repack_extensions_str: str = self.config.get("repack_file_extensions", "")
         self.repack_file_extensions: List[str] = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
         self.repack_zip_password: str = self.config.get("repack_zip_password", "")
         self.file_size_threshold_mb: int = self.config.get("file_size_threshold_mb", 100)
+        
+        # 媒体转换配置
         self.auto_convert_video_threshold_mb: int = self.config.get("auto_convert_video_threshold_mb", 0)
+        self.enable_auto_convert_image: bool = self.config.get("enable_auto_convert_image", False)
+        self.image_convert_max_size_mb: int = 15  # 图片转换大小限制，超过15MB会不稳定
         
         self.temp_dir = os.path.join(StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -64,6 +88,11 @@ class GroupFileCheckerPlugin(Star):
         file_ext = os.path.splitext(filename)[1].lower()
         return file_ext == '.mp4'
     
+    def _is_image_file(self, filename: str) -> bool:
+        """检测文件是否为图片格式（支持 jpg/jpeg/png）"""
+        file_ext = os.path.splitext(filename)[1].lower()
+        return file_ext in ['.jpg', '.jpeg', '.png']
+    
     async def _delete_group_file(self, event: AstrMessageEvent, file_id: str, file_name: str) -> bool:
         """删除群文件"""
         group_id = int(event.get_group_id())
@@ -81,49 +110,60 @@ class GroupFileCheckerPlugin(Star):
             logger.error(f"[{group_id}] ❌ 删除群文件时发生错误: {e}", exc_info=True)
             return False
     
-    async def _convert_file_to_video(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: int) -> bool:
+    async def _convert_file_to_media(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: int, media_type: str) -> bool:
         """
-        将文件转换为视频形式发送
+        将文件转换为媒体形式发送（支持视频和图片）
+        
+        Args:
+            media_type: 'video' 或 'image'
         
         Returns:
             bool: True 表示转换成功；False 表示转换失败
         """
         group_id = int(event.get_group_id())
-        local_video_path = None
+        local_file_path = None
         
         try:
-            logger.info(f"[{group_id}] 🎬 开始视频转换流程: {file_name}")
+            media_name = "视频" if media_type == "video" else "图片"
+            emoji = "🎬" if media_type == "video" else "🖼️"
+            logger.info(f"[{group_id}] {emoji} 开始{media_name}转换流程: {file_name}")
             
             async with self.download_semaphore:
-                local_video_path = await file_component.get_file()
+                local_file_path = await file_component.get_file()
             
-            if not local_video_path or not os.path.exists(local_video_path):
-                logger.error(f"[{group_id}] ❌ 下载视频文件失败")
+            if not local_file_path or not os.path.exists(local_file_path):
+                logger.error(f"[{group_id}] ❌ 下载{media_name}文件失败")
                 return False
             
             file_size_mb = file_size / (1024 * 1024)
-            absolute_path = os.path.abspath(local_video_path)
+            absolute_path = os.path.abspath(local_file_path)
             
-            logger.info(f"[{group_id}] 📹 准备以视频形式发送文件 ({file_size_mb:.2f} MB): {absolute_path}")
+            logger.info(f"[{group_id}] 📤 准备以{media_name}形式发送文件 ({file_size_mb:.2f} MB): {absolute_path}")
             
-            from astrbot.api.message_components import Video
-            video_message = MessageChain([Video(file=f"file:///{absolute_path}")])
-            await event.send(video_message)
+            if media_type == "video":
+                from astrbot.api.message_components import Video
+                media_message = MessageChain([Video(file=f"file:///{absolute_path}")])
+            else:  # image
+                from astrbot.api.message_components import Image
+                media_message = MessageChain([Image(file=absolute_path)])
             
-            logger.info(f"[{group_id}] ✅ 视频发送成功，将在 30 分钟后删除群文件和本地缓存")
+            await event.send(media_message)
+            
+            logger.info(f"[{group_id}] ✅ {media_name}发送成功，将在 30 分钟后删除群文件和本地缓存")
             
             # 30分钟后删除群文件和本地缓存
             delete_delay = 1800  # 30分钟
-            asyncio.create_task(self._delayed_cleanup(event, file_name, local_video_path, delete_delay))
+            asyncio.create_task(self._delayed_cleanup(event, file_name, local_file_path, delete_delay))
             
             return True  # 转换成功
             
         except Exception as e:
-            logger.error(f"[{group_id}] ❌ 视频发送失败: {e}", exc_info=True)
-            if local_video_path and os.path.exists(local_video_path):
+            media_name = "视频" if media_type == "video" else "图片"
+            logger.error(f"[{group_id}] ❌ {media_name}发送失败: {e}", exc_info=True)
+            if local_file_path and os.path.exists(local_file_path):
                 try:
-                    os.remove(local_video_path)
-                    logger.info(f"[{group_id}] 🗑️ 已清理下载失败的本地视频缓存")
+                    os.remove(local_file_path)
+                    logger.info(f"[{group_id}] 🗑️ 已清理下载失败的本地{media_name}缓存")
                 except OSError:
                     pass
             return False  # 发送失败
@@ -280,7 +320,7 @@ class GroupFileCheckerPlugin(Star):
                         if file_size is not None and self.file_size_threshold_mb > 0:
                             file_size_mb = file_size / (1024 * 1024)
                             if file_size_mb > self.file_size_threshold_mb:
-                                logger.info(f"[{group_id}] 文件 '{file_name}' 大小 ({file_size_mb:.2f} MB) 超过处理阈值 ({self.file_size_threshold_mb} MB)，跳过所有处理。")
+                                logger.debug(f"[{group_id}] 文件 '{file_name}' 大小 ({file_size_mb:.2f} MB) 超过处理阈值 ({self.file_size_threshold_mb} MB)，跳过所有处理。")
                                 return
                         logger.debug(f"成功解析: 文件名='{file_name}', ID='{file_id}'")
                         file_component = self._find_file_component(event)
@@ -319,7 +359,7 @@ class GroupFileCheckerPlugin(Star):
                             if self._is_video_file(file_name):
                                 file_size_mb = file_size / (1024 * 1024)
                                 if file_size_mb > self.auto_convert_video_threshold_mb:
-                                    logger.info(f"[{group_id}] 视频文件 '{file_name}' ({file_size_mb:.2f} MB) 超过转换阈值 ({self.auto_convert_video_threshold_mb} MB)，跳过自动转换")
+                                    logger.debug(f"[{group_id}] 视频文件 '{file_name}' ({file_size_mb:.2f} MB) 超过转换阈值 ({self.auto_convert_video_threshold_mb} MB)，跳过自动转换")
 
                         await self._handle_file_check_flow(event, file_name, file_id, file_component, file_size)
                         break
@@ -461,7 +501,7 @@ class GroupFileCheckerPlugin(Star):
         preview_text, preview_extra_info = await self._get_preview_for_file(file_name, file_component, file_size)
 
         if is_gfs_valid:
-            # 文件有效，检查是否需要视频转换
+            # 文件有效，检查是否需要媒体转换（视频或图片）
             should_convert_video = (
                 self.auto_convert_video_threshold_mb > 0 
                 and file_size is not None 
@@ -469,10 +509,21 @@ class GroupFileCheckerPlugin(Star):
                 and (file_size / (1024 * 1024)) <= self.auto_convert_video_threshold_mb
             )
             
+            should_convert_image = (
+                self.enable_auto_convert_image
+                and file_size is not None 
+                and self._is_image_file(file_name)
+                and (file_size / (1024 * 1024)) <= self.image_convert_max_size_mb
+            )
+            
             if should_convert_video:
                 logger.info(f"[{group_id}] 🎬 文件有效，符合视频转换条件，尝试转换")
                 # 尝试转换，不管成功与否都继续正常流程
-                await self._convert_file_to_video(event, file_name, file_id, file_component, file_size)
+                await self._convert_file_to_media(event, file_name, file_id, file_component, file_size, "video")
+            elif should_convert_image:
+                logger.info(f"[{group_id}] 🖼️ 文件有效，符合图片转换条件，尝试转换")
+                # 尝试转换，不管成功与否都继续正常流程
+                await self._convert_file_to_media(event, file_name, file_id, file_component, file_size, "image")
             
             if self.notify_on_success:
                 success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
@@ -552,12 +603,39 @@ class GroupFileCheckerPlugin(Star):
         except Exception:
             return "", "未知"
             
-    async def _get_preview_from_zip(self, file_path: str) -> tuple[str, str]:
+    def _is_text_file(self, file_name: str) -> bool:
+        """检查文件是否为支持的文本格式"""
+        file_lower = file_name.lower()
+        return any(file_lower.endswith(ext) for ext in self.supported_text_formats)
+    
+    def _is_archive_file(self, file_name: str) -> bool:
+        """检查文件是否为支持的压缩格式"""
+        file_lower = file_name.lower()
+        return any(file_lower.endswith(ext) for ext in self.supported_archive_formats)
+    
+    async def _get_preview_from_archive(self, file_path: str, file_name: str) -> tuple[str, str]:
+        """通用压缩包预览方法，支持多种格式"""
         extract_path = os.path.join(self.temp_dir, f"extract_{int(time.time())}")
         os.makedirs(extract_path, exist_ok=True)
         
+        archive_type = "压缩包"
+        if file_name.lower().endswith('.zip'):
+            archive_type = "ZIP"
+        elif file_name.lower().endswith('.7z'):
+            archive_type = "7Z"
+        elif file_name.lower().endswith('.rar'):
+            archive_type = "RAR"
+        elif any(file_name.lower().endswith(ext) for ext in ['.tar.gz', '.tgz']):
+            archive_type = "TAR.GZ"
+        elif any(file_name.lower().endswith(ext) for ext in ['.tar.bz2', '.tbz2']):
+            archive_type = "TAR.BZ2"
+        elif any(file_name.lower().endswith(ext) for ext in ['.tar.xz', '.txz']):
+            archive_type = "TAR.XZ"
+        elif file_name.lower().endswith('.tar'):
+            archive_type = "TAR"
+        
         try:
-            logger.info("正在尝试无密码解压...")
+            logger.info(f"正在尝试解压 {archive_type} 文件（无密码）...")
             command_no_pwd = ["7za", "x", file_path, f"-o{extract_path}", "-y"]
             process = await asyncio.create_subprocess_exec(
                 *command_no_pwd,
@@ -568,7 +646,7 @@ class GroupFileCheckerPlugin(Star):
 
             if process.returncode != 0:
                 if self.default_zip_password:
-                    logger.info("无密码解压失败，正在尝试使用默认密码...")
+                    logger.info(f"无密码解压 {archive_type} 失败，正在尝试使用默认密码...")
                     command_with_pwd = ["7za", "x", file_path, f"-o{extract_path}", f"-p{self.default_zip_password}", "-y"]
                     process = await asyncio.create_subprocess_exec(
                         *command_with_pwd,
@@ -579,12 +657,12 @@ class GroupFileCheckerPlugin(Star):
                     
                     if process.returncode != 0:
                         error_message = stderr.decode('utf-8')
-                        logger.error(f"使用默认密码解压失败: {error_message}")
-                        return "", "解压失败"
+                        logger.error(f"使用默认密码解压 {archive_type} 失败: {error_message}")
+                        return "", f"{archive_type} 解压失败"
                 else:
                     error_message = stderr.decode('utf-8')
-                    logger.error(f"使用 7za 命令解压失败且未设置默认密码: {error_message}")
-                    return "", "解压失败"
+                    logger.error(f"使用 7za 命令解压 {archive_type} 失败且未设置默认密码: {error_message}")
+                    return "", f"{archive_type} 解压失败"
 
             all_extracted_files = []
             for root, dirs, files in os.walk(extract_path):
@@ -592,15 +670,17 @@ class GroupFileCheckerPlugin(Star):
                     full_path = os.path.join(root, f)
                     all_extracted_files.append(full_path)
             
-            txt_files = [f for f in all_extracted_files if f.lower().endswith('.txt')]
+            # 查找所有支持的文本文件
+            text_files = [f for f in all_extracted_files 
+                         if any(f.lower().endswith(ext) for ext in self.supported_text_formats)]
             
-            if not txt_files:
-                # 如果没有找到txt文件，输出压缩包的文件结构
+            if not text_files:
+                # 如果没有找到文本文件，输出压缩包的文件结构
                 if not all_extracted_files:
-                    return "", "压缩包为空或解压失败"
+                    return "", f"{archive_type} 为空或解压失败"
                 
                 # 构建文件结构树
-                file_structure = ["📦 压缩包内文件结构："]
+                file_structure = [f"📦 {archive_type} 文件结构："]
                 for f_path in sorted(all_extracted_files):
                     relative_path = os.path.relpath(f_path, extract_path)
                     try:
@@ -627,27 +707,43 @@ class GroupFileCheckerPlugin(Star):
                 structure_text = "\n".join(file_structure)
                 return structure_text, "文件结构"
                 
-            first_txt_file = txt_files[0]
-            safe_txt_name = os.path.basename(first_txt_file)
+            # 优先级排序：README 文件 > txt/md 文件 > 其他文本文件 > 按文件大小
+            def sort_priority(file_path):
+                basename = os.path.basename(file_path).lower()
+                # 第一优先级：README 文件
+                if basename.startswith('readme'):
+                    return (0, 0, os.path.getsize(file_path))
+                # 第二优先级：txt 和 md 文件
+                elif basename.endswith('.txt'):
+                    return (1, 0, os.path.getsize(file_path))
+                elif basename.endswith('.md'):
+                    return (1, 1, os.path.getsize(file_path))
+                # 第三优先级：其他文本文件，按大小排序（小文件优先）
+                else:
+                    return (2, 0, os.path.getsize(file_path))
             
-            if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', safe_txt_name):
-                logger.error(f"解压出的文件名 '{safe_txt_name}' 包含非安全字符，跳过预览。")
+            text_files.sort(key=sort_priority)
+            first_text_file = text_files[0]
+            safe_text_name = os.path.basename(first_text_file)
+            
+            if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', safe_text_name):
+                logger.error(f"解压出的文件名 '{safe_text_name}' 包含非安全字符，跳过预览。")
                 return "", "解压出的文件名不安全"
 
-            extracted_txt_path = first_txt_file  # 已经是完整路径了
+            extracted_text_path = first_text_file  # 已经是完整路径了
             
-            with open(extracted_txt_path, 'rb') as f:
+            with open(extracted_text_path, 'rb') as f:
                 content_bytes = f.read(self.preview_length * 4)
             
             preview_text, encoding = self._get_preview_from_bytes(content_bytes)
-            extra_info = f"已解压「{safe_txt_name}」(格式 {encoding})"
+            extra_info = f"已解压「{safe_text_name}」(格式 {encoding})"
             return preview_text, extra_info
             
         except FileNotFoundError:
             logger.error("解压失败：容器内未找到 7za 命令。请安装 p7zip-full。")
             return "", "未安装 7za"
         except Exception as e:
-            logger.error(f"处理ZIP文件时发生未知错误: {e}", exc_info=True)
+            logger.error(f"处理 {archive_type} 文件时发生未知错误: {e}", exc_info=True)
             return "", "未知错误"
         finally:
             if extract_path and os.path.exists(extract_path):
@@ -663,32 +759,32 @@ class GroupFileCheckerPlugin(Star):
                     logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
 
     async def _get_preview_for_file(self, file_name: str, file_component: Comp.File, file_size: Optional[int] = None) -> tuple[str, str]:
-        is_txt = file_name.lower().endswith('.txt')
-        is_zip = self.enable_zip_preview and file_name.lower().endswith('.zip')
+        is_text = self._is_text_file(file_name)
+        is_archive = self.enable_zip_preview and self._is_archive_file(file_name)
         
-        if not (is_txt or is_zip):
+        if not (is_text or is_archive):
             return "", ""
         
-        if is_zip and file_size is not None:
-            zip_size_mb = file_size / (1024 * 1024)
+        if is_archive and file_size is not None:
+            archive_size_mb = file_size / (1024 * 1024)
             limit_mb = self.zip_extraction_size_limit_mb
             
-            if limit_mb > 0 and zip_size_mb > limit_mb:
-                logger.info(f"ZIP文件大小 ({zip_size_mb:.2f} MB) 超过配置的上限 ({limit_mb} MB)，跳过下载和解压预览。")
+            if limit_mb > 0 and archive_size_mb > limit_mb:
+                logger.debug(f"压缩文件大小 ({archive_size_mb:.2f} MB) 超过配置的上限 ({limit_mb} MB)，跳过下载和解压预览。")
                 return "", "文件过大，跳过解压"
         
         local_file_path = None
         try:
             async with self.download_semaphore:
                 local_file_path = await file_component.get_file()
-            if is_txt:
+            if is_text:
                 with open(local_file_path, 'rb') as f:
                     content_bytes = f.read(self.preview_length * 4)
                 preview_text, encoding = self._get_preview_from_bytes(content_bytes)
                 extra_info = f"格式为 {encoding}"
                 return preview_text, extra_info
-            if is_zip:
-                return await self._get_preview_from_zip(local_file_path)
+            if is_archive:
+                return await self._get_preview_from_archive(local_file_path, file_name)
         except Exception as e:
             logger.error(f"获取预览时下载或读取文件失败: {e}", exc_info=True)
             return "", ""
@@ -731,7 +827,7 @@ class GroupFileCheckerPlugin(Star):
                         else:
                             logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
                 elif not file_component:
-                    logger.info(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
+                    logger.debug(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")

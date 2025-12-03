@@ -42,20 +42,20 @@
         "default": false
     },
     "enable_zip_preview": {
-        "description": "启用ZIP文件预览",
-        "hint": "开启后，插件会尝试解压收到的ZIP压缩包，并对其中的TXT文件进行内容预览。",
+        "description": "启用压缩文件预览",
+        "hint": "开启后，插件会尝试解压收到的压缩包（支持 ZIP/7Z/TAR/GZ/BZ2/XZ 等格式），并对其中的文本文件进行内容预览。",
         "type": "bool",
         "default": true
     },
     "zip_extraction_size_limit_mb": {
-        "description": "ZIP解压大小上限 (MB)",
-        "hint": "ZIP文件大小超过此值时，将不会尝试解压以获取预览。设置为 0 则不限制。",
+        "description": "压缩文件解压大小上限 (MB)",
+        "hint": "压缩文件大小超过此值时，将不会尝试解压以获取预览。设置为 0 则不限制。",
         "type": "int",
         "default": 100
     },
     "default_zip_password": {
-        "description": "ZIP文件默认解压密码",
-        "hint": "当直接解压ZIP失败时，会尝试使用此密码进行解压。留空表示不使用密码重试。",
+        "description": "压缩文件默认解压密码",
+        "hint": "当直接解压失败时，会尝试使用此密码进行解压（支持 ZIP/7Z 等加密格式）。留空表示不使用密码重试。",
         "type": "string",
         "default": ""
     },
@@ -67,7 +67,7 @@
     },
     "repack_zip_password": {
         "description": "重新打包ZIP的加密密码",
-        "hint": "为失效TXT重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
+        "hint": "为失效文件重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
         "type": "string",
         "default": ""
     },
@@ -79,8 +79,14 @@
     },
     "auto_convert_video_threshold_mb": {
         "description": "视频文件自动转换阈值 (MB)",
-        "hint": "当上传的文件是 MP4 视频格式且大小小于此值时，将自动以视频形式重新发送。设置为 0 表示不启用此功能。",
+        "hint": "当上传的文件是 MP4 视频格式且大小小于或等于此值时，将自动以视频形式重新发送。设置为 0 表示不启用此功能。",
         "type": "int",
         "default": 0
+    },
+    "enable_auto_convert_image": {
+        "description": "启用图片文件自动转换",
+        "hint": "开启后，上传的 JPG/PNG 图片文件（≤15MB）将自动以图片形式重新发送。",
+        "type": "bool",
+        "default": false
     }
 }
