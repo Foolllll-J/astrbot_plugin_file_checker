@@ -16,7 +16,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 @register(
     "astrbot_plugin_file_checker",
     "Foolllll",
-    "群文件失效检查",
+    "群文件有效性检查",
     "1.7",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
