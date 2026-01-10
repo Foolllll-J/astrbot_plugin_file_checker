@@ -15,7 +15,7 @@
         "description": "预检延时 (秒)",
         "hint": "收到文件后，等待多少秒再开始进行阶段一的即时检查。建议设为3-10秒。",
         "type": "int",
-        "default": 10
+        "default": 5
     },
     "check_delay_seconds": {
         "description": "复核间隔时间 (秒)",
@@ -27,13 +27,7 @@
         "description": "文本预览长度 (字符)",
         "hint": "设置在回复中显示的文本内容预览的最大字符数。",
         "type": "int",
-        "default": 200
-    },
-    "forward_threshold": {
-        "description": "长消息合并转发阈值 (字符)",
-        "hint": "当插件的单条回复超过此字数时，将自动转为合并转发。设置为 0 则禁用此功能。",
-        "type": "int",
-        "default": 300
+        "default": 500
     },
     "enable_duplicate_check": {
         "description": "启用文件重复性检查",
@@ -85,7 +79,7 @@
     },
     "enable_auto_convert_image": {
         "description": "启用图片文件自动转换",
-        "hint": "开启后，上传的 JPG/PNG 图片文件（≤15MB）将自动以图片形式重新发送。",
+        "hint": "开启后，上传的 JPG/PNG/GIF/WEBP 图片文件（≤15MB）将自动以图片形式重新发送。",
         "type": "bool",
         "default": false
     }
