@@ -5,6 +5,7 @@ import time
 import chardet
 import subprocess
 import re
+import pypdfium2 as pdfium
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
@@ -15,8 +16,8 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 @register(
     "astrbot_plugin_file_checker",
     "Foolllll",
-    "群文件有效性检查",
-    "1.7.1",
+    "群文件预览助手",
+    "1.8.0",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -60,8 +61,9 @@ class GroupFileCheckerPlugin(Star):
         
         # 媒体转换配置
         self.auto_convert_video_threshold_mb: int = self.config.get("auto_convert_video_threshold_mb", 0)
-        self.enable_auto_convert_image: bool = self.config.get("enable_auto_convert_image", False)
-        self.image_convert_max_size_mb: int = 15  # 图片转换大小限制，超过15MB会不稳定
+        self.enable_auto_convert_image = self.config.get("enable_auto_convert_image", False)
+        self.pdf_preview_pages = self.config.get("pdf_preview_pages", 0)
+        self.image_convert_max_size_mb = 15  # 图片转换大小限制，超过15MB会不稳定
         
         self.temp_dir = os.path.join(StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -90,6 +92,11 @@ class GroupFileCheckerPlugin(Star):
         """检测文件是否为图片格式（支持 jpg/jpeg/png/gif/webp）"""
         file_ext = os.path.splitext(filename)[1].lower()
         return file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+    
+    def _is_pdf_file(self, filename: str) -> bool:
+        """检测文件是否为 PDF 格式"""
+        file_ext = os.path.splitext(filename)[1].lower()
+        return file_ext == '.pdf'
     
     async def _delete_group_file(self, event: AstrMessageEvent, file_id: str, file_name: str) -> bool:
         """删除群文件"""
@@ -462,6 +469,37 @@ class GroupFileCheckerPlugin(Star):
 
         preview_text, preview_extra_info = await self._get_preview_for_file(file_name, file_component, file_size)
 
+        # PDF 预览生成 (无论有效性，和文本预览保持一致)
+        pdf_preview_nodes = []
+        if self.pdf_preview_pages > 0 and self._is_pdf_file(file_name):
+            logger.info(f"[{group_id}] 📄 尝试生成 PDF 预览 ({self.pdf_preview_pages} 页)")
+            local_pdf_path = None
+            try:
+                async with self.download_semaphore:
+                    local_pdf_path = await file_component.get_file()
+                
+                if local_pdf_path and os.path.exists(local_pdf_path):
+                    image_paths = await self._get_pdf_preview(local_pdf_path)
+                    if image_paths:
+                        sender_id = event.get_self_id()
+                        for img_path in image_paths:
+                            pdf_preview_nodes.append(Comp.Node(uin=sender_id, name="PDF 预览", content=[Comp.Image.fromFileSystem(img_path)]))
+                        
+                        # 延迟清理图片
+                        async def cleanup_images(paths):
+                            await asyncio.sleep(60)
+                            for p in paths:
+                                try:
+                                    if os.path.exists(p): os.remove(p)
+                                except: pass
+                        asyncio.create_task(cleanup_images(image_paths))
+            except Exception as e:
+                logger.error(f"[{group_id}] PDF 预览处理出错: {e}", exc_info=True)
+            finally:
+                if local_pdf_path and os.path.exists(local_pdf_path):
+                    try: os.remove(local_pdf_path)
+                    except: pass
+
         if is_gfs_valid:
             # 文件有效，检查是否需要媒体转换（视频或图片）
             should_convert_video = (
@@ -502,8 +540,21 @@ class GroupFileCheckerPlugin(Star):
                     success_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
                     if not is_file_structure and len(preview_text) > self.preview_length:
                         success_message += "..."
-                    
+                
+                if pdf_preview_nodes:
+                    # 将文字通知作为合并转发的第一条记录
+                    success_message += f"\n📄 PDF 预览图如下："
+                    sender_id = event.get_self_id()
+                    pdf_preview_nodes.insert(0, Comp.Node(uin=sender_id, name="PDF 预览", content=[Comp.Plain(success_message)]))
+                    yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
+                    logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)-1} 页，包含文字通知)")
+                else:
                     yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(success_message)])
+            elif pdf_preview_nodes:
+                # 如果没开启成功通知但有 PDF 预览
+                yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
+                logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)} 页)")
+
             logger.info(f"[{group_id}] 初步检查通过，已加入延时复核队列。")
             asyncio.create_task(self._task_delayed_recheck(event, file_name, file_id, file_component, preview_text))
         else:
@@ -522,7 +573,15 @@ class GroupFileCheckerPlugin(Star):
                     if not is_file_structure and len(preview_text) > self.preview_length:
                         failure_message += "..."
                 
-                yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(failure_message)])
+                if pdf_preview_nodes:
+                    # 将文字通知作为合并转发的第一条记录
+                    failure_message += f"\n📄 PDF 预览图如下："
+                    sender_id = event.get_self_id()
+                    pdf_preview_nodes.insert(0, Comp.Node(uin=sender_id, name="PDF 预览", content=[Comp.Plain(failure_message)]))
+                    yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
+                    logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)-1} 页，包含文字通知)")
+                else:
+                    yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(failure_message)])
 
                 if self.repack_file_extensions:
                     file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
@@ -538,7 +597,6 @@ class GroupFileCheckerPlugin(Star):
                             await self._delete_group_file(event, current_file_id, file_name)
                         else:
                             logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
-                
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段一] 回复失效通知时再次发生错误: {send_e}")
 
@@ -763,6 +821,26 @@ class GroupFileCheckerPlugin(Star):
                     logger.warning(f"删除临时文件 {local_file_path} 失败: {e}")
         return "", ""
 
+    async def _get_pdf_preview(self, file_path: str) -> List[str]:
+        """使用 pypdfium2 生成 PDF 预览图"""
+        image_paths = []
+        try:
+            pdf = pdfium.PdfDocument(file_path)
+            num_pages = len(pdf)
+            pages_to_render = min(num_pages, self.pdf_preview_pages)
+            
+            for i in range(pages_to_render):
+                page = pdf[i]
+                bitmap = page.render(scale=2)
+                image_path = os.path.join(self.temp_dir, f"pdf_preview_{int(time.time())}_{i}.png")
+                bitmap.to_pil().save(image_path)
+                image_paths.append(image_path)
+                page.close() # 释放资源
+            pdf.close() # 释放资源
+        except Exception as e:
+            logger.error(f"生成 PDF 预览失败: {e}", exc_info=True)
+        return image_paths
+
     async def _task_delayed_recheck(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, preview_text: str):
         """延时复核任务"""
         await asyncio.sleep(self.check_delay_seconds)
@@ -801,4 +879,4 @@ class GroupFileCheckerPlugin(Star):
             logger.info(f"✅ [{group_id}] [阶段二] 文件 '{file_name}' 延时复核通过，保持沉默。")
 
     async def terminate(self):
-        logger.info("插件 [群文件有效性检查检查] 已卸载。")
+        logger.info("插件 [群文件预览助手] 已卸载。")

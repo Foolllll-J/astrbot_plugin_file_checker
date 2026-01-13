@@ -82,5 +82,11 @@
         "hint": "开启后，上传的 JPG/PNG/GIF/WEBP 图片文件（≤15MB）将自动以图片形式重新发送。",
         "type": "bool",
         "default": false
+    },
+    "pdf_preview_pages": {
+        "description": "PDF 预览页数",
+        "hint": "设置 PDF 文件预览的页数。默认 0 表示不启用 PDF 预览。",
+        "type": "int",
+        "default": 0
     }
 }
