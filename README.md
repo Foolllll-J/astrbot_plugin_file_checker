@@ -1,8 +1,14 @@
+<div align="center">
+
 # 🔍 群文件预览助手
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
+
+</div>
+
+## 📖 简介
 
 一款为 [AstrBot](https://astrbot.app) 设计的、功能强大的文件检查与预览插件。它可以精准检查文件是否有效，并能立即提供内容预览（支持文本、压缩包、PDF等），在一段时间后对有效文件进行二次复核，以确保文件的可用性。
 
@@ -124,4 +130,12 @@
 
 * [AstrBot 帮助文档](https://astrbot.app)
 * 如果您在使用中遇到问题，欢迎在本仓库提交 [Issue](https://github.com/Foolllll-J/astrbot_plugin_file_checker/issues)。
+
+---
+
+<div align="center">
+
+**觉得好用的话，给个 ⭐ Star 吧！**
+
+</div>
 

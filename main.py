@@ -17,7 +17,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件预览助手",
-    "1.8.0",
+    "1.8.1",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -527,7 +527,13 @@ class GroupFileCheckerPlugin(Star):
                 async for result in self._convert_file_to_media(event, file_name, file_id, file_component, file_size, "image"):
                     yield result
             
-            if self.notify_on_success:
+            text_preview_enabled = self.preview_length > 0
+            has_any_preview = bool(preview_text or pdf_preview_nodes)
+            
+            if self.notify_on_success and not text_preview_enabled:
+                success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
+                yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(success_message)])
+            elif self.notify_on_success and text_preview_enabled:
                 success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
                 if preview_text:
                     # 文件结构列表不截断，普通文本预览才截断
@@ -550,10 +556,27 @@ class GroupFileCheckerPlugin(Star):
                     logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)-1} 页，包含文字通知)")
                 else:
                     yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(success_message)])
-            elif pdf_preview_nodes:
-                # 如果没开启成功通知但有 PDF 预览
-                yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
-                logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)} 页)")
+            elif (not self.notify_on_success) and text_preview_enabled and has_any_preview:
+                success_message = f"✅ 您发送的文件「{file_name}」初步检查有效。"
+                if preview_text:
+                    is_file_structure = preview_extra_info == "文件结构"
+                    if is_file_structure:
+                        preview_text_short = preview_text
+                    else:
+                        preview_text_short = preview_text[:self.preview_length]
+                    
+                    success_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
+                    if not is_file_structure and len(preview_text) > self.preview_length:
+                        success_message += "..."
+                
+                if pdf_preview_nodes:
+                    success_message += f"\n📄 PDF 预览图如下："
+                    sender_id = event.get_self_id()
+                    pdf_preview_nodes.insert(0, Comp.Node(uin=sender_id, name="PDF 预览", content=[Comp.Plain(success_message)]))
+                    yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
+                    logger.info(f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_nodes)-1} 页，包含文字通知)")
+                else:
+                    yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(success_message)])
 
             logger.info(f"[{group_id}] 初步检查通过，已加入延时复核队列。")
             asyncio.create_task(self._task_delayed_recheck(event, file_name, file_id, file_component, preview_text))
@@ -784,6 +807,8 @@ class GroupFileCheckerPlugin(Star):
                     logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
 
     async def _get_preview_for_file(self, file_name: str, file_component: Comp.File, file_size: Optional[int] = None) -> tuple[str, str]:
+        if self.preview_length <= 0:
+            return "", ""
         is_text = self._is_text_file(file_name)
         is_archive = self.enable_zip_preview and self._is_archive_file(file_name)
         

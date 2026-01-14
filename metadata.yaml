@@ -1,6 +1,6 @@
 name: astrbot_plugin_file_checker
 display_name: 群文件预览助手
 desc: 对QQ新上传的群文件进行有效性检查和内容预览(仅限napcat)
-version: v1.8.0
+version: v1.8.1
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_file_checker
