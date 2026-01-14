@@ -1,5 +1,7 @@
 import asyncio
 import os
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional
 import time
 import chardet
@@ -17,7 +19,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件预览助手",
-    "1.8.1",
+    "1.9.0",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -45,7 +47,7 @@ class GroupFileCheckerPlugin(Star):
         # 支持文本预览的文件格式
         self.supported_text_formats = (
             # 文档类
-            '.txt', '.md', '.log',
+            '.txt', '.md', '.log', '.epub',
             # 配置类
             '.json', '.xml', '.yaml', '.yml', '.ini', '.conf', '.cfg', '.toml',
             # 代码类
@@ -543,7 +545,7 @@ class GroupFileCheckerPlugin(Star):
                     else:
                         preview_text_short = preview_text[:self.preview_length]
                     
-                    success_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
+                    success_message += f"\n{preview_extra_info}：\n{preview_text_short}"
                     if not is_file_structure and len(preview_text) > self.preview_length:
                         success_message += "..."
                 
@@ -565,7 +567,7 @@ class GroupFileCheckerPlugin(Star):
                     else:
                         preview_text_short = preview_text[:self.preview_length]
                     
-                    success_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
+                    success_message += f"\n{preview_extra_info}：\n{preview_text_short}"
                     if not is_file_structure and len(preview_text) > self.preview_length:
                         success_message += "..."
                 
@@ -592,7 +594,7 @@ class GroupFileCheckerPlugin(Star):
                     else:
                         preview_text_short = preview_text[:self.preview_length]
                     
-                    failure_message += f"\n{preview_extra_info}，以下是预览：\n{preview_text_short}"
+                    failure_message += f"\n{preview_extra_info}：\n{preview_text_short}"
                     if not is_file_structure and len(preview_text) > self.preview_length:
                         failure_message += "..."
                 
@@ -806,13 +808,145 @@ class GroupFileCheckerPlugin(Star):
                 except Exception as e:
                     logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
 
+    def _is_epub_file(self, file_name: str) -> bool:
+        """检查文件是否为 EPUB 格式"""
+        return file_name.lower().endswith('.epub')
+
+    def _extract_epub_text(self, epub_path: str, max_chars: int = 1000) -> str:
+        """
+        从 EPUB 文件中提取纯文本预览内容。
+        使用标准库实现，无需额外依赖。
+        """
+        if not zipfile.is_zipfile(epub_path):
+            return "错误：不是有效的 EPUB 文件（无效的 ZIP 结构）。"
+
+        try:
+            with zipfile.ZipFile(epub_path, 'r') as z:
+                # 1. 找到 container.xml 以获取 .opf 文件路径
+                try:
+                    container_content = z.read('META-INF/container.xml')
+                    root = ET.fromstring(container_content)
+                    # 命名空间处理
+                    ns = {'ns': 'urn:oasis:names:tc:opendocument:xmlns:container'}
+                    rootfile = root.find('.//ns:rootfile', ns)
+                    if rootfile is None:
+                        return "错误：EPUB 结构异常，未找到 rootfile。"
+                    opf_path = rootfile.attrib.get('full-path')
+                except Exception as e:
+                    return f"错误：解析 container.xml 失败: {e}"
+
+                if not opf_path:
+                    return "错误：未找到 OPF 文件路径。"
+
+                # 2. 解析 .opf 文件
+                try:
+                    opf_content = z.read(opf_path)
+                    opf_dir = os.path.dirname(opf_path)
+                    root = ET.fromstring(opf_content)
+                    
+                    # OPF 命名空间通常是 http://www.idpf.org/2007/opf
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    
+                    # 获取 manifest (id -> href 映射)
+                    manifest = {}
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        item_id = item.attrib.get('id')
+                        href = item.attrib.get('href')
+                        if item_id and href:
+                            manifest[item_id] = href
+                    
+                    # 获取 spine (阅读顺序)
+                    spine_items = []
+                    for itemref in root.findall('.//opf:spine/opf:itemref', ns):
+                        idref = itemref.attrib.get('idref')
+                        if idref in manifest:
+                            # 处理路径拼接，注意 EPUB 内部使用正斜杠
+                            full_href = os.path.join(opf_dir, manifest[idref]).replace('\\', '/')
+                            spine_items.append(full_href)
+                except Exception as e:
+                    return f"错误：解析 OPF 文件失败: {e}"
+
+                # 3. 按顺序读取 spine 中的内容并提取文本
+                full_text = []
+                current_len = 0
+                
+                # 定义 HTML 处理正则
+                # 1. 匹配 <style> 和 <script> 块及其内容并删除
+                re_scripts = re.compile(r'<(script|style).*?>.*?</\1>', re.DOTALL | re.IGNORECASE)
+                # 2. 将块级标签转换为换行符
+                re_block_tags = re.compile(r'<(p|div|br|li|h[1-6]|tr|blockquote|section|article).*?>', re.IGNORECASE)
+                # 3. 匹配所有剩余 HTML 标签
+                re_tags = re.compile(r'<[^>]+>')
+                # 4. 匹配重复的空白字符（不包括换行）
+                re_spaces = re.compile(r'[ \t\f\v]+')
+                # 5. 匹配三个及以上的换行符
+                re_newlines = re.compile(r'\n{3,}')
+
+                for item_path in spine_items:
+                    # 考虑到 EPUB 章节可能很大，我们每次提取完检查总长度
+                    if current_len >= max_chars * 2: # 稍微多取一点点，方便后续精确截断
+                        break
+                    
+                    try:
+                        html_content = z.read(item_path).decode('utf-8', errors='ignore')
+                        
+                        # 0. 预处理：去掉脚本和样式，并将原有的换行符转为空格
+                        text = re_scripts.sub('', html_content)
+                        text = text.replace('\r', ' ').replace('\n', ' ')
+                        
+                        # 1. 将块级标签转为换行
+                        text = re_block_tags.sub('\n', text)
+                        
+                        # 2. 去掉剩余标签
+                        text = re_tags.sub('', text)
+                        
+                        # 3. 实体转换
+                        text = text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"')
+                        
+                        # 4. 压缩水平空白
+                        text = re_spaces.sub(' ', text)
+                        
+                        # 5. 逐行处理：去掉每行首尾空格，并过滤掉空行
+                        lines = []
+                        for line in text.split('\n'):
+                            stripped = line.strip()
+                            if stripped:
+                                lines.append(stripped)
+                        
+                        # 重新组合文本，并在段落间保留一个换行
+                        text = '\n'.join(lines)
+                        
+                        if text:
+                            full_text.append(text)
+                            current_len += len(text)
+                    except Exception:
+                        continue
+                
+                # 合并所有章节内容
+                result = "\n\n".join(full_text)
+                # 再次确保没有过多的换行符
+                result = re_newlines.sub('\n\n', result).strip()
+                
+                if not result:
+                    return "（未提取到有效文本内容）"
+                
+                if len(result) > max_chars:
+                    return result[:max_chars + 1]
+                
+                return result
+
+        except Exception as e:
+            logger.error(f"提取 EPUB 文本时出错: {e}", exc_info=True)
+            return f"错误：提取失败: {e}"
+
     async def _get_preview_for_file(self, file_name: str, file_component: Comp.File, file_size: Optional[int] = None) -> tuple[str, str]:
         if self.preview_length <= 0:
             return "", ""
         is_text = self._is_text_file(file_name)
+        is_epub = self._is_epub_file(file_name)
         is_archive = self.enable_zip_preview and self._is_archive_file(file_name)
         
-        if not (is_text or is_archive):
+        if not (is_text or is_epub or is_archive):
             return "", ""
         
         if is_archive and file_size is not None:
@@ -827,12 +961,18 @@ class GroupFileCheckerPlugin(Star):
         try:
             async with self.download_semaphore:
                 local_file_path = await file_component.get_file()
+            
+            if is_epub:
+                preview_text = self._extract_epub_text(local_file_path, self.preview_length)
+                return preview_text, "📖 EPUB 内容预览"
+
             if is_text:
                 with open(local_file_path, 'rb') as f:
                     content_bytes = f.read(self.preview_length * 4)
                 preview_text, encoding = self._get_preview_from_bytes(content_bytes)
-                extra_info = f"格式为 {encoding}"
+                extra_info = f"📄 文本预览 ({encoding})"
                 return preview_text, extra_info
+            
             if is_archive:
                 return await self._get_preview_from_archive(local_file_path, file_name)
         except Exception as e:
