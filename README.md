@@ -2,6 +2,8 @@
 
 # 🔍 群文件预览助手
 
+<i>📡多格式秒开预览，全天候失效预警</i>
+
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
@@ -118,6 +120,8 @@
   * 支持群聊白名单、成功通知开关、复核延时等基础配置。
 
 </details>
+
+---
 
 ## ❓ 常见问题
 

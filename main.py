@@ -19,7 +19,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件预览助手",
-    "1.9.0",
+    "1.9.1",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -1026,7 +1026,8 @@ class GroupFileCheckerPlugin(Star):
                     file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
                     if file_ext in self.repack_file_extensions:
                         logger.info(f"文件在延时复核时失效，触发重新打包任务 (文件类型: {file_ext})...")
-                        await self._repack_and_send_file(event, file_name, file_component)
+                        async for msg_chain in self._repack_and_send_file(event, file_name, file_component):
+                            await event.send(msg_chain)
                         # 补档后删除已失效的原文件
                         logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
                         # 重新查询文件ID以确保准确删除
