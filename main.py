@@ -19,7 +19,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
     "astrbot_plugin_file_checker",
     "Foolllll",
     "群文件预览助手",
-    "1.9.1",
+    "1.9.2",
     "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
 )
 class GroupFileCheckerPlugin(Star):
@@ -615,13 +615,8 @@ class GroupFileCheckerPlugin(Star):
                         async for result in self._repack_and_send_file(event, file_name, file_component):
                             yield result
                         # 补档后删除已失效的原文件
-                        logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
-                        # 重新查询文件ID以确保准确删除
-                        current_file_id = await self._search_file_id_by_name(event, file_name)
-                        if current_file_id:
-                            await self._delete_group_file(event, current_file_id, file_name)
-                        else:
-                            logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
+                        logger.info(f"[{group_id}] 补档完成，已创建 10 分钟后的延迟删除任务")
+                        asyncio.create_task(self._delayed_delete_file(event, file_name, 600))
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段一] 回复失效通知时再次发生错误: {send_e}")
 
@@ -1029,13 +1024,8 @@ class GroupFileCheckerPlugin(Star):
                         async for msg_chain in self._repack_and_send_file(event, file_name, file_component):
                             await event.send(msg_chain)
                         # 补档后删除已失效的原文件
-                        logger.info(f"[{group_id}] 补档完成，删除已失效的原文件")
-                        # 重新查询文件ID以确保准确删除
-                        current_file_id = await self._search_file_id_by_name(event, file_name)
-                        if current_file_id:
-                            await self._delete_group_file(event, current_file_id, file_name)
-                        else:
-                            logger.warning(f"[{group_id}] 无法查询到原文件ID，可能已被删除")
+                        logger.info(f"[{group_id}] 补档完成，已创建 10 分钟后的延迟删除任务")
+                        asyncio.create_task(self._delayed_delete_file(event, file_name, 600))
                 elif not file_component:
                     logger.debug(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
 
@@ -1043,6 +1033,19 @@ class GroupFileCheckerPlugin(Star):
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")
         else:
             logger.info(f"✅ [{group_id}] [阶段二] 文件 '{file_name}' 延时复核通过，保持沉默。")
+
+    async def _delayed_delete_file(self, event: AstrMessageEvent, file_name: str, delay: int):
+        """延迟删除群文件"""
+        await asyncio.sleep(delay)
+        group_id = int(event.get_group_id())
+        
+        # 重新查询文件ID以确保准确删除
+        current_file_id = await self._search_file_id_by_name(event, file_name)
+        if current_file_id:
+            await self._delete_group_file(event, current_file_id, file_name)
+            logger.info(f"[{group_id}] 延迟删除任务完成: {file_name}")
+        else:
+            logger.warning(f"[{group_id}] 延迟删除任务取消: 无法查询到文件 '{file_name}' ID，可能已被手动删除")
 
     async def terminate(self):
         logger.info("插件 [群文件预览助手] 已卸载。")
