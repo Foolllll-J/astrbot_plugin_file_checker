@@ -15,35 +15,47 @@ from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
-@register(
-    "astrbot_plugin_file_checker",
-    "Foolllll",
-    "群文件预览助手",
-    "1.9.2",
-    "https://github.com/Foolllll-J/astrbot_plugin_file_checker"
-)
+
 class GroupFileCheckerPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict] = None):
         super().__init__(context)
         self.config = config if config else {}
+
+        # 全局配置
         self.group_whitelist: List[int] = self.config.get("group_whitelist", [])
         self.group_whitelist = [int(gid) for gid in self.group_whitelist]
-        self.notify_on_success: bool = self.config.get("notify_on_success", True)
-        self.pre_check_delay_seconds: int = self.config.get("pre_check_delay_seconds", 5)
-        self.check_delay_seconds: int = self.config.get("check_delay_seconds", 300)
-        self.preview_length: int = self.config.get("preview_length", 500)
-        self.enable_duplicate_check: bool = self.config.get("enable_duplicate_check", False)
-        self.enable_zip_preview: bool = self.config.get("enable_zip_preview", True)
-        self.zip_extraction_size_limit_mb: int = self.config.get("zip_extraction_size_limit_mb", 100)
-        self.default_zip_password: str = self.config.get("default_zip_password", "")
-        
+        self.file_size_threshold_mb: int = self.config.get("file_size_threshold_mb", 100)
+
+        # 有效性检查设置
+        validity_check = self.config.get("validity_check", {})
+        self.notify_on_success: bool = validity_check.get("notify_on_success", True)
+        self.pre_check_delay_seconds: int = validity_check.get("pre_check_delay_seconds", 5)
+        self.check_delay_seconds: int = validity_check.get("check_delay_seconds", 300)
+        self.enable_duplicate_check: bool = validity_check.get("enable_duplicate_check", False)
+
+        # 预览与转换设置
+        preview_conversion = self.config.get("preview_conversion", {})
+        self.preview_length: int = preview_conversion.get("preview_length", 500)
+        self.pdf_preview_pages: int = preview_conversion.get("pdf_preview_pages", 0)
+        self.enable_zip_preview: bool = preview_conversion.get("enable_zip_preview", True)
+        self.zip_extraction_size_limit_mb: int = preview_conversion.get("zip_extraction_size_limit_mb", 100)
+        self.default_zip_password: str = preview_conversion.get("default_zip_password", "")
+        self.enable_auto_convert_image: bool = preview_conversion.get("enable_auto_convert_image", False)
+        self.auto_convert_video_threshold_mb: int = preview_conversion.get("auto_convert_video_threshold_mb", 0)
+
+        # 失效文件补档设置
+        file_repack = self.config.get("file_repack", {})
+        repack_extensions_str: str = file_repack.get("repack_file_extensions", "")
+        self.repack_file_extensions: List[str] = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
+        self.repack_zip_password: str = file_repack.get("repack_zip_password", "")
+
         # 7za 支持的压缩格式（不包括 RAR5）
         self.supported_archive_formats = (
             '.zip', '.7z', '.tar', '.gz', '.bz2', '.xz',
             '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz',
             '.iso', '.wim', '.rar'
         )
-        
+
         # 支持文本预览的文件格式
         self.supported_text_formats = (
             # 文档类
@@ -56,22 +68,19 @@ class GroupFileCheckerPlugin(Star):
             # 数据类
             '.csv', '.properties', '.env'
         )
-        repack_extensions_str: str = self.config.get("repack_file_extensions", "")
-        self.repack_file_extensions: List[str] = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
-        self.repack_zip_password: str = self.config.get("repack_zip_password", "")
-        self.file_size_threshold_mb: int = self.config.get("file_size_threshold_mb", 100)
-        
-        # 媒体转换配置
-        self.auto_convert_video_threshold_mb: int = self.config.get("auto_convert_video_threshold_mb", 0)
-        self.enable_auto_convert_image = self.config.get("enable_auto_convert_image", False)
-        self.pdf_preview_pages = self.config.get("pdf_preview_pages", 0)
-        self.image_convert_max_size_mb = 15  # 图片转换大小限制，超过15MB会不稳定
-        
+
+        # 图片转换大小限制，超过15MB会不稳定
+        self.image_convert_max_size_mb = 15
+
         self.temp_dir = os.path.join(StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp")
         os.makedirs(self.temp_dir, exist_ok=True)
-        
+
+        # 文件检查间隔控制：多个文件之间间隔0.3秒
+        self.check_interval = 0.3  # 固定间隔300ms
+        self.last_check_time = None  # 上次检查时间，None表示首次检查
+
         self.download_semaphore = asyncio.Semaphore(5)
-        logger.info("插件 [群文件失效检查] 已加载。")
+        logger.info("QQ 文件预览插件已加载。")
 
     def _find_file_component(self, event: AstrMessageEvent) -> Optional[Comp.File]:
         for segment in event.get_messages():
@@ -142,7 +151,7 @@ class GroupFileCheckerPlugin(Star):
             file_size_mb = file_size / (1024 * 1024)
             absolute_path = os.path.abspath(local_file_path)
             
-            logger.info(f"[{group_id}] 📤 准备以{media_name}形式发送文件 ({file_size_mb:.2f} MB): {absolute_path}")
+            logger.debug(f"[{group_id}] 📤 准备以{media_name}形式发送文件 ({file_size_mb:.2f} MB): {absolute_path}")
             
             if media_type == "video":
                 media_message = [Comp.Video(file=f"file:///{absolute_path}")]
@@ -165,7 +174,7 @@ class GroupFileCheckerPlugin(Star):
             if local_file_path and os.path.exists(local_file_path):
                 try:
                     os.remove(local_file_path)
-                    logger.info(f"[{group_id}] 🗑️ 已清理下载失败的本地{media_name}缓存")
+                    logger.debug(f"[{group_id}] 🗑️ 已清理下载失败的本地{media_name}缓存")
                 except OSError:
                     pass
             return  # 发送失败
@@ -175,7 +184,7 @@ class GroupFileCheckerPlugin(Star):
         await asyncio.sleep(delay)
         
         group_id = int(event.get_group_id())
-        logger.info(f"[{group_id}] 开始延迟清理视频文件: {file_name}")
+        logger.debug(f"[{group_id}] 开始延迟清理视频文件: {file_name}")
         
         # 通过文件名查询最新的 file_id
         file_id = await self._search_file_id_by_name(event, file_name)
@@ -189,7 +198,7 @@ class GroupFileCheckerPlugin(Star):
         if local_path and os.path.exists(local_path):
             try:
                 os.remove(local_path)
-                logger.info(f"[{group_id}] 🗑️ 已删除本地视频缓存: {os.path.basename(local_path)}")
+                logger.debug(f"[{group_id}] 🗑️ 已删除本地视频缓存: {os.path.basename(local_path)}")
             except OSError as e:
                 logger.warning(f"[{group_id}] ⚠️ 删除本地视频缓存失败: {e}")
     
@@ -277,10 +286,10 @@ class GroupFileCheckerPlugin(Star):
             logger.debug(f"[{group_id}] 已从候选项中排除自身文件，共 {len(removed_files)} 个。")
         
         if existing_files:
-            logger.info(f"[{group_id}] 最终确认 {len(existing_files)} 个真正的重复文件。")
+            logger.debug(f"[{group_id}] 最终确认 {len(existing_files)} 个真正的重复文件。")
             for f in existing_files:
                 modify_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))
-                logger.info(
+                logger.debug(
                     f"  ↳ 文件名: '{f.get('file_name', '未知')}'\n"
                     f"    文件ID: {f.get('file_id', '未知')}\n"
                     f"    大小: {f.get('file_size', '未知')}字节\n"
@@ -289,7 +298,7 @@ class GroupFileCheckerPlugin(Star):
                     f"    所属文件夹: {f.get('parent_folder_name', '根目录')}"
                 )
         else:
-            logger.info(f"[{group_id}] 未找到真正的重复文件。")
+            logger.debug(f"[{group_id}] 未找到真正的重复文件。")
         
         return existing_files
     
@@ -299,7 +308,7 @@ class GroupFileCheckerPlugin(Star):
         group_id = int(event.get_group_id())
         if self.group_whitelist and group_id not in self.group_whitelist:
             return
-        
+
         try:
             raw_event_data = event.message_obj.raw_message
             message_list = raw_event_data.get("message")
@@ -330,7 +339,7 @@ class GroupFileCheckerPlugin(Star):
                         if not file_component:
                             logger.error("致命错误：无法在组件中找到对应的File对象！")
                             return
-                        
+
                         if self.enable_duplicate_check and file_size is not None:
                             upload_time = raw_event_data.get("time", int(time.time()))
                             logger.debug(f"[{group_id}] 新上传文件时间戳: {upload_time} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_time))})")
@@ -412,7 +421,7 @@ class GroupFileCheckerPlugin(Star):
                 yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(f"❌ 重新打包失败，错误信息：\n{error_message}")])
                 return
             
-            logger.info(f"文件已重新打包至 {repacked_file_path}，准备发送...")
+            logger.debug(f"文件已重新打包至 {repacked_file_path}，准备发送...")
             
             reply_text = "已为您重新打包为ZIP文件发送："
             file_component_to_send = Comp.File(file=repacked_file_path, name=new_zip_name)
@@ -443,7 +452,7 @@ class GroupFileCheckerPlugin(Star):
                     await asyncio.sleep(10)
                     try:
                         os.remove(path)
-                        logger.info(f"已清理临时文件: {path}")
+                        logger.debug(f"已清理临时文件: {path}")
                     except OSError as e:
                         logger.warning(f"删除临时文件 {path} 失败: {e}")
                 asyncio.create_task(cleanup_file(repacked_file_path))
@@ -451,19 +460,29 @@ class GroupFileCheckerPlugin(Star):
             if renamed_txt_path and os.path.exists(renamed_txt_path):
                 try:
                     os.remove(renamed_txt_path)
-                    logger.info(f"已清理重命名后的临时文件: {renamed_txt_path}")
+                    logger.debug(f"已清理重命名后的临时文件: {renamed_txt_path}")
                 except OSError as e:
                     logger.warning(f"删除临时文件 {renamed_txt_path} 失败: {e}")
-    
+
     async def _handle_file_check_flow(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: Optional[int] = None):
         group_id = int(event.get_group_id())
-        
+
         sender_id = event.get_sender_id()
         self_id = event.get_self_id()
         if sender_id == self_id:
-            logger.info(f"[{group_id}] 机器人发送的文件，直接跳过处理。")
+            logger.debug(f"[{group_id}] 机器人发送的文件，直接跳过处理。")
             return
-        
+
+        # 等待间隔时间，确保多个文件处理之间有0.3秒间隔
+        if self.last_check_time is not None:
+            current_time = time.time()
+            time_since_last_check = current_time - self.last_check_time
+            if time_since_last_check < self.check_interval:
+                wait_time = self.check_interval - time_since_last_check
+                logger.debug(f"[{group_id}] 等待 {wait_time:.2f}秒后再处理文件")
+                await asyncio.sleep(wait_time)
+        self.last_check_time = time.time()
+
         await asyncio.sleep(self.pre_check_delay_seconds)
         logger.info(f"[{group_id}] [阶段一] 开始即时检查: '{file_name}'")
 
@@ -474,7 +493,7 @@ class GroupFileCheckerPlugin(Star):
         # PDF 预览生成 (无论有效性，和文本预览保持一致)
         pdf_preview_nodes = []
         if self.pdf_preview_pages > 0 and self._is_pdf_file(file_name):
-            logger.info(f"[{group_id}] 📄 尝试生成 PDF 预览 ({self.pdf_preview_pages} 页)")
+            logger.debug(f"[{group_id}] 📄 尝试生成 PDF 预览 ({self.pdf_preview_pages} 页)")
             local_pdf_path = None
             try:
                 async with self.download_semaphore:
@@ -621,6 +640,7 @@ class GroupFileCheckerPlugin(Star):
                 logger.error(f"[{group_id}] [阶段一] 回复失效通知时再次发生错误: {send_e}")
 
     async def _check_validity_via_gfs(self, event: AstrMessageEvent, file_id: str) -> bool:
+        """检查文件有效性"""
         group_id = int(event.get_group_id())
         try:
             assert isinstance(event, AiocqhttpMessageEvent)
@@ -799,7 +819,7 @@ class GroupFileCheckerPlugin(Star):
                         for name in dirs:
                             os.rmdir(os.path.join(root, name))
                     os.rmdir(extract_path)
-                    logger.info(f"已清理临时文件夹: {extract_path}")
+                    logger.debug(f"已清理临时文件夹: {extract_path}")
                 except Exception as e:
                     logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
 
@@ -1006,7 +1026,7 @@ class GroupFileCheckerPlugin(Star):
         await asyncio.sleep(self.check_delay_seconds)
         group_id = int(event.get_group_id())
         
-        logger.info(f"[{group_id}] [阶段二] 开始延时复核: '{file_name}'")
+        logger.debug(f"[{group_id}] [阶段二] 开始延时复核: '{file_name}'")
         
         is_still_valid = await self._check_validity_via_gfs(event, file_id)
         
@@ -1032,7 +1052,7 @@ class GroupFileCheckerPlugin(Star):
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")
         else:
-            logger.info(f"✅ [{group_id}] [阶段二] 文件 '{file_name}' 延时复核通过，保持沉默。")
+            logger.debug(f"✅ [{group_id}] [阶段二] 文件 '{file_name}' 延时复核通过，保持沉默。")
 
     async def _delayed_delete_file(self, event: AstrMessageEvent, file_name: str, delay: int):
         """延迟删除群文件"""
@@ -1043,9 +1063,9 @@ class GroupFileCheckerPlugin(Star):
         current_file_id = await self._search_file_id_by_name(event, file_name)
         if current_file_id:
             await self._delete_group_file(event, current_file_id, file_name)
-            logger.info(f"[{group_id}] 延迟删除任务完成: {file_name}")
+            logger.debug(f"[{group_id}] 延迟删除任务完成: {file_name}")
         else:
             logger.warning(f"[{group_id}] 延迟删除任务取消: 无法查询到文件 '{file_name}' ID，可能已被手动删除")
 
     async def terminate(self):
-        logger.info("插件 [群文件预览助手] 已卸载。")
+        logger.info("QQ 文件预览插件已卸载。")

@@ -5,88 +5,109 @@
         "type": "list",
         "default": []
     },
-    "pre_check_delay_seconds": {
-        "description": "预检延时 (秒)",
-        "hint": "收到文件后，等待多少秒再开始进行阶段一的即时检查。建议设为3-10秒。",
-        "type": "int",
-        "default": 5
-    },
-    "check_delay_seconds": {
-        "description": "复核间隔时间 (秒)",
-        "hint": "预检通过后，再等待多少秒进行时效性复核。",
-        "type": "int",
-        "default": 300
-    },
     "file_size_threshold_mb": {
         "description": "文件处理大小阈值 (MB)",
         "hint": "文件大小超过此值时，将完全跳过该文件的所有处理。设置为 0 则不限制。",
         "type": "int",
         "default": 100
     },
-    "notify_on_success": {
-        "description": "成功时发送通知",
-        "hint": "开启后，文件检查有效时也会发送一条回复通知。关闭则只在文件失效时通知。",
-        "type": "bool",
-        "default": true
+    "validity_check": {
+        "type": "object",
+        "description": "有效性检查设置",
+        "hint": "配置文件有效性检查相关参数",
+        "items": {
+            "pre_check_delay_seconds": {
+                "description": "预检延时 (秒)",
+                "hint": "收到文件后，等待多少秒再开始进行阶段一的即时检查。建议设为3-10秒。",
+                "type": "int",
+                "default": 5
+            },
+            "check_delay_seconds": {
+                "description": "复核间隔时间 (秒)",
+                "hint": "预检通过后，再等待多少秒进行时效性复核。",
+                "type": "int",
+                "default": 300
+            },
+            "notify_on_success": {
+                "description": "成功时发送通知",
+                "hint": "开启后，文件检查有效时也会发送一条回复通知。关闭则只在文件失效时通知。",
+                "type": "bool",
+                "default": true
+            },
+            "enable_duplicate_check": {
+                "description": "启用重复文件检查",
+                "hint": "开启后，当新文件上传时，将根据文件大小检查群文件中是否已存在相同文件。",
+                "type": "bool",
+                "default": false
+            }
+        }
     },
-    "enable_duplicate_check": {
-        "description": "启用重复文件检查",
-        "hint": "开启后，当新文件上传时，将根据文件大小检查群文件中是否已存在相同文件。",
-        "type": "bool",
-        "default": false
+    "preview_conversion": {
+        "type": "object",
+        "description": "预览与转换设置",
+        "hint": "配置文件预览、媒体转换相关参数",
+        "items": {
+            "preview_length": {
+                "description": "文本预览长度 (字符)",
+                "hint": "设置在回复中显示的文本内容预览的最大字符数，设置为 0 表示不启用文本预览。",
+                "type": "int",
+                "default": 500
+            },
+            "pdf_preview_pages": {
+                "description": "PDF 预览页数",
+                "hint": "设置 PDF 文件预览的页数。默认 0 表示不启用 PDF 预览。",
+                "type": "int",
+                "default": 0
+            },
+            "enable_zip_preview": {
+                "description": "启用压缩文件预览",
+                "hint": "开启后，插件会尝试解压收到的压缩包（支持 ZIP/7Z/TAR/GZ/BZ2/XZ 等格式），并对其中的文本文件进行内容预览。",
+                "type": "bool",
+                "default": true
+            },
+            "zip_extraction_size_limit_mb": {
+                "description": "压缩文件解压大小上限 (MB)",
+                "hint": "压缩文件大小超过此值时，将不会尝试解压以获取预览。设置为 0 则不限制。",
+                "type": "int",
+                "default": 100
+            },
+            "default_zip_password": {
+                "description": "压缩文件默认解压密码",
+                "hint": "当直接解压失败时，会尝试使用此密码进行解压（支持 ZIP/7Z 等加密格式）。留空表示不使用密码重试。",
+                "type": "string",
+                "default": ""
+            },
+            "enable_auto_convert_image": {
+                "description": "启用图片文件自动转换",
+                "hint": "开启后，上传的 JPG/PNG/GIF/WEBP 图片文件（≤15MB）将自动以图片形式重新发送。",
+                "type": "bool",
+                "default": false
+            },
+            "auto_convert_video_threshold_mb": {
+                "description": "视频文件自动转换阈值 (MB)",
+                "hint": "当上传的文件是 MP4 视频格式且大小小于或等于此值时，将自动以视频形式重新发送。设置为 0 表示不启用此功能。",
+                "type": "int",
+                "default": 0
+            }
+        }
     },
-    "preview_length": {
-        "description": "文本预览长度 (字符)",
-        "hint": "设置在回复中显示的文本内容预览的最大字符数，设置为 0 表示不启用文本预览。",
-        "type": "int",
-        "default": 500
-    },
-    "pdf_preview_pages": {
-        "description": "PDF 预览页数",
-        "hint": "设置 PDF 文件预览的页数。默认 0 表示不启用 PDF 预览。",
-        "type": "int",
-        "default": 0
-    },
-    "enable_auto_convert_image": {
-        "description": "启用图片文件自动转换",
-        "hint": "开启后，上传的 JPG/PNG/GIF/WEBP 图片文件（≤15MB）将自动以图片形式重新发送。",
-        "type": "bool",
-        "default": false
-    },
-    "auto_convert_video_threshold_mb": {
-        "description": "视频文件自动转换阈值 (MB)",
-        "hint": "当上传的文件是 MP4 视频格式且大小小于或等于此值时，将自动以视频形式重新发送。设置为 0 表示不启用此功能。",
-        "type": "int",
-        "default": 0
-    },
-    "enable_zip_preview": {
-        "description": "启用压缩文件预览",
-        "hint": "开启后，插件会尝试解压收到的压缩包（支持 ZIP/7Z/TAR/GZ/BZ2/XZ 等格式），并对其中的文本文件进行内容预览。",
-        "type": "bool",
-        "default": true
-    },
-    "zip_extraction_size_limit_mb": {
-        "description": "压缩文件解压大小上限 (MB)",
-        "hint": "压缩文件大小超过此值时，将不会尝试解压以获取预览。设置为 0 则不限制。",
-        "type": "int",
-        "default": 100
-    },
-    "default_zip_password": {
-        "description": "压缩文件默认解压密码",
-        "hint": "当直接解压失败时，会尝试使用此密码进行解压（支持 ZIP/7Z 等加密格式）。留空表示不使用密码重试。",
-        "type": "string",
-        "default": ""
-    },
-    "repack_file_extensions": {
-        "description": "支持的补档后缀",
-        "hint": "只有在列表中的文件类型才会在失效时自动打包发送。用逗号分隔，如: txt,pdf。留空表示不开启自动补档功能。",
-        "type": "text",
-        "default": ""
-    },
-    "repack_zip_password": {
-        "description": "重新打包ZIP的加密密码",
-        "hint": "为失效文件重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
-        "type": "string",
-        "default": ""
+    "file_repack": {
+        "type": "object",
+        "description": "失效文件补档设置",
+        "hint": "配置失效文件自动重新打包发送功能",
+        "items": {
+            "repack_file_extensions": {
+                "description": "支持的补档后缀",
+                "hint": "只有在列表中的文件类型才会在失效时自动打包发送。用逗号分隔，如: txt,pdf。留空表示不开启自动补档功能。",
+                "type": "text",
+                "default": ""
+            },
+            "repack_zip_password": {
+                "description": "重新打包ZIP的加密密码",
+                "hint": "为失效文件重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
+                "type": "string",
+                "default": ""
+            }
+        }
     }
 }
