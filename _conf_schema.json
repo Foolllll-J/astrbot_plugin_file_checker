@@ -11,6 +11,12 @@
         "type": "int",
         "default": 100
     },
+    "enable_emoji": {
+        "description": "启用表情回应",
+        "hint": "开启后，插件会根据文件处理结果在原消息上贴表情回应。",
+        "type": "bool",
+        "default": true
+    },
     "validity_check": {
         "type": "object",
         "description": "有效性检查设置",
