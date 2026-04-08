@@ -1,118 +1,230 @@
 {
-    "group_whitelist": {
-        "description": "群聊白名单",
-        "hint": "仅在白名单里的群启用本插件功能，不填表示所有群都启用",
-        "type": "list",
-        "default": []
-    },
-    "file_size_threshold_mb": {
-        "description": "文件处理大小阈值 (MB)",
-        "hint": "文件大小超过此值时，将完全跳过该文件的所有处理。设置为 0 则不限制。",
-        "type": "int",
-        "default": 100
-    },
-    "enable_emoji": {
-        "description": "启用表情回应",
-        "hint": "开启后，插件会根据文件处理结果在原消息上贴表情回应。",
-        "type": "bool",
-        "default": true
-    },
-    "validity_check": {
+    "global_settings": {
         "type": "object",
-        "description": "有效性检查设置",
-        "hint": "配置文件有效性检查相关参数",
+        "description": "全局设置",
+        "hint": "插件的全局基础配置，影响所有群聊。",
         "items": {
-            "pre_check_delay_seconds": {
-                "description": "预检延时 (秒)",
-                "hint": "收到文件后，等待多少秒再开始进行阶段一的即时检查。建议设为3-10秒。",
-                "type": "int",
-                "default": 5
+            "group_whitelist": {
+                "description": "群聊白名单",
+                "hint": "仅在白名单里的群启用本插件功能，不填表示所有群都启用。",
+                "type": "list",
+                "default": []
             },
-            "check_delay_seconds": {
-                "description": "复核间隔时间 (秒)",
-                "hint": "预检通过后，再等待多少秒进行时效性复核。",
-                "type": "int",
-                "default": 300
-            },
-            "notify_on_success": {
-                "description": "成功时发送通知",
-                "hint": "开启后，文件检查有效时也会发送一条回复通知。关闭则只在文件失效时通知。",
-                "type": "bool",
-                "default": true
-            },
-            "enable_duplicate_check": {
-                "description": "启用重复文件检查",
-                "hint": "开启后，当新文件上传时，将根据文件大小检查群文件中是否已存在相同文件。",
-                "type": "bool",
-                "default": false
-            }
-        }
-    },
-    "preview_conversion": {
-        "type": "object",
-        "description": "预览与转换设置",
-        "hint": "配置文件预览、媒体转换相关参数",
-        "items": {
-            "preview_length": {
-                "description": "文本预览长度 (字符)",
-                "hint": "设置在回复中显示的文本内容预览的最大字符数，设置为 0 表示不启用文本预览。",
-                "type": "int",
-                "default": 500
-            },
-            "pdf_preview_pages": {
-                "description": "PDF 预览页数",
-                "hint": "设置 PDF 文件预览的页数。默认 0 表示不启用 PDF 预览。",
-                "type": "int",
-                "default": 0
-            },
-            "enable_zip_preview": {
-                "description": "启用压缩文件预览",
-                "hint": "开启后，插件会尝试解压收到的压缩包（支持 ZIP/7Z/TAR/GZ/BZ2/XZ 等格式），并对其中的文本文件进行内容预览。",
-                "type": "bool",
-                "default": true
-            },
-            "zip_extraction_size_limit_mb": {
-                "description": "压缩文件解压大小上限 (MB)",
-                "hint": "压缩文件大小超过此值时，将不会尝试解压以获取预览。设置为 0 则不限制。",
+            "file_size_threshold_mb": {
+                "description": "文件处理大小阈值 (MB)",
+                "hint": "文件大小超过此值时，将完全跳过该文件的所有处理。设置为 0 则不限制。",
                 "type": "int",
                 "default": 100
-            },
-            "default_zip_password": {
-                "description": "压缩文件默认解压密码",
-                "hint": "当直接解压失败时，会尝试使用此密码进行解压（支持 ZIP/7Z 等加密格式）。留空表示不使用密码重试。",
-                "type": "string",
-                "default": ""
-            },
-            "enable_auto_convert_image": {
-                "description": "启用图片文件自动转换",
-                "hint": "开启后，上传的 JPG/PNG/GIF/WEBP 图片文件（≤15MB）将自动以图片形式重新发送。",
-                "type": "bool",
-                "default": false
-            },
-            "auto_convert_video_threshold_mb": {
-                "description": "视频文件自动转换阈值 (MB)",
-                "hint": "当上传的文件是 MP4 视频格式且大小小于或等于此值时，将自动以视频形式重新发送。设置为 0 表示不启用此功能。",
-                "type": "int",
-                "default": 0
             }
         }
     },
-    "file_repack": {
-        "type": "object",
-        "description": "失效文件补档设置",
-        "hint": "配置失效文件自动重新打包发送功能",
-        "items": {
-            "repack_file_extensions": {
-                "description": "支持的补档后缀",
-                "hint": "只有在列表中的文件类型才会在失效时自动打包发送。用逗号分隔，如: txt,pdf。留空表示不开启自动补档功能。",
-                "type": "text",
-                "default": ""
-            },
-            "repack_zip_password": {
-                "description": "重新打包ZIP的加密密码",
-                "hint": "为失效文件重新打包成ZIP文件时使用的加密密码。留空表示不加密。",
-                "type": "string",
-                "default": ""
+    "check_module": {
+        "type": "template_list",
+        "description": "文件检查",
+        "hint": "配置文件的有效性检查、重复检查及通知行为。",
+        "default": [
+            {
+                "group_id": [],
+                "enable_emoji": true,
+                "notify_on_success": true,
+                "pre_check_delay_seconds": 5,
+                "check_delay_seconds": 300,
+                "enable_duplicate_check": false
+            }
+        ],
+        "templates": {
+            "default": {
+                "name": "检查配置",
+                "items": {
+                    "group_id": {
+                        "description": "群号",
+                        "hint": "填入群号列表以应用此配置。留空则作为全局默认配置。",
+                        "type": "list",
+                        "default": []
+                    },
+                    "enable_emoji": {
+                        "description": "启用表情回应",
+                        "hint": "开启后，插件会根据文件处理结果在原消息上贴表情回应。",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "notify_on_success": {
+                        "description": "成功时发送通知",
+                        "hint": "开启后，文件检查有效时也会发送一条回复通知。关闭则只在文件失效时通知。",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "pre_check_delay_seconds": {
+                        "description": "预检延时 (秒)",
+                        "hint": "收到文件后，等待多少秒再进行即时检查。给协议端留出上传时间，建议 3-10 秒。",
+                        "type": "int",
+                        "default": 5
+                    },
+                    "check_delay_seconds": {
+                        "description": "复核间隔时间 (秒)",
+                        "hint": "即时检查通过后，再等待多少秒进行时效性复核，用于检测后续是否失效。",
+                        "type": "int",
+                        "default": 300
+                    },
+                    "enable_duplicate_check": {
+                        "description": "启用重复文件检查",
+                        "hint": "开启后，新文件上传时将扫描群文件，若大小完全相同则提醒重复。",
+                        "type": "bool",
+                        "default": false
+                    },
+                    "purify_rules": {
+                        "description": "文件名净化规则",
+                        "hint": "按正则表达式删除文件名中的内容。例如：\"^\\[广告\\]\" 会删除文件名开头的 [广告]。",
+                        "type": "list",
+                        "default": []
+                    }
+                }
+            }
+        }
+    },
+    "preview_module": {
+        "type": "template_list",
+        "description": "文件预览",
+        "hint": "配置文本、压缩包、PDF的预览以及媒体文件的转换发送规则。",
+        "default": [
+            {
+                "group_id": [],
+                "preview_length": 500,
+                "pdf_preview_pages": 0,
+                "zip_extraction_size_limit_mb": 0,
+                "default_zip_password": "",
+                "enable_auto_convert_image": false,
+                "auto_convert_video_threshold_mb": 0
+            }
+        ],
+        "templates": {
+            "default": {
+                "name": "预览配置",
+                "items": {
+                    "group_id": {
+                        "description": "群号",
+                        "hint": "填入群号列表以应用此配置。留空则作为全局默认配置。",
+                        "type": "list",
+                        "default": []
+                    },
+                    "preview_length": {
+                        "description": "文本预览长度 (字符)",
+                        "hint": "显示的文本预览最大字符数。设为 0 表示不启用文本预览。",
+                        "type": "int",
+                        "default": 500
+                    },
+                    "pdf_preview_pages": {
+                        "description": "PDF 预览页数",
+                        "hint": "PDF 文件自动生成的预览图页数。默认 0 为不生成。",
+                        "type": "int",
+                        "default": 0
+                    },
+                    "zip_extraction_size_limit_mb": {
+                        "description": "压缩包预览大小上限 (MB)",
+                        "hint": "压缩包超过此大小将不尝试解压预览。默认 0 表示不启用压缩包预览。",
+                        "type": "int",
+                        "default": 0
+                    },
+                    "default_zip_password": {
+                        "description": "压缩包默认解压密码",
+                        "hint": "遇到加密压缩包时尝试使用的密码，留空则不重试。",
+                        "type": "string",
+                        "default": ""
+                    },
+                    "enable_auto_convert_image": {
+                        "description": "启用图片自动直发",
+                        "hint": "开启后，JPG/PNG/GIF 等图片文件（≤15MB）将自动以图片消息重新发送。",
+                        "type": "bool",
+                        "default": false
+                    },
+                    "auto_convert_video_threshold_mb": {
+                        "description": "视频自动转换阈值 (MB)",
+                        "hint": "MP4 视频小于此值时，将自动以视频消息重新发送。0 为不启用。",
+                        "type": "int",
+                        "default": 0
+                    }
+                }
+            }
+        }
+    },
+    "repack_module": {
+        "type": "template_list",
+        "description": "文件补档",
+        "hint": "配置文件失效后的自动补档逻辑。",
+        "default": [
+            {
+                "group_id": [],
+                "repack_file_extensions": "",
+                "repack_zip_password": ""
+            }
+        ],
+        "templates": {
+            "default": {
+                "name": "补档配置",
+                "items": {
+                    "group_id": {
+                        "description": "群号",
+                        "type": "list",
+                        "default": [],
+                        "hint": "填入群号列表以应用此配置。留空则作为全局默认配置。"
+                    },
+                    "repack_file_extensions": {
+                        "description": "支持补档的后缀",
+                        "hint": "用逗号分隔，如: txt,pdf。留空则表示对所有格式的文件失效后都进行补档。",
+                        "type": "text",
+                        "default": ""
+                    },
+                    "repack_zip_password": {
+                        "description": "补档 ZIP 加密密码",
+                        "hint": "补档生成的 ZIP 文件所使用的加密密码。",
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            }
+        }
+    },
+    "backup_module": {
+        "type": "template_list",
+        "description": "文件备份",
+        "hint": "配置文件备份逻辑，可将文件转发到目标会话。",
+        "default": [
+            {
+                "group_id": [],
+                "target_sid": "",
+                "backup_extensions": "",
+                "only_invalid": false
+            }
+        ],
+        "templates": {
+            "default": {
+                "name": "备份配置",
+                "items": {
+                    "group_id": {
+                        "description": "群号",
+                        "hint": "填入群号列表以应用此配置。留空则作为全局默认配置。",
+                        "type": "list",
+                        "default": []
+                    },
+                    "target_sid": {
+                        "description": "目标会话 SID",
+                        "hint": "文件将备份发送到的目标会话完整 SID。",
+                        "type": "string",
+                        "default": ""
+                    },
+                    "backup_extensions": {
+                        "description": "备份文件后缀",
+                        "hint": "需要备份的文件后缀，用逗号分隔。留空则表示全部文件都备份。",
+                        "type": "text",
+                        "default": ""
+                    },
+                    "only_invalid": {
+                        "description": "仅备份失效文件",
+                        "hint": "开启后只有文件失效时才备份，关闭则所有文件都备份。",
+                        "type": "bool",
+                        "default": false
+                    }
+                }
             }
         }
     }
