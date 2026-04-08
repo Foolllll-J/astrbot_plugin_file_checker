@@ -9,7 +9,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-from .utils import is_msg_still_available, react_to_msg, get_group_config, is_msg_still_available, build_notification_text, backup_file_to_session
+from .utils import is_msg_still_available, react_to_msg, get_group_config, build_notification_text, backup_file_to_session
 
 
 class CheckerManager:
@@ -373,8 +373,9 @@ class CheckerManager:
         await react_to_msg(event, "357", enable_emoji)
 
         # 构建失效通知文案
+        preview_config = get_group_config(self.plugin.config, str(event.get_group_id()), "preview_module")
         failure_message = build_notification_text(
-            file_name, False, preview_text, extra_info, check_config
+            file_name, False, preview_text, extra_info, preview_config
         )
 
         # 使用合并转发发送 PDF 预览（如果有）

@@ -118,7 +118,7 @@ class PreviewManager:
         file_lower = file_name.lower()
         return any(file_lower.endswith(ext) for ext in self.supported_archive_formats)
 
-    async def _get_preview_from_archive(self, file_path: str, file_name: str, preview_config: dict = None, keep_extracted_pdf: bool = False) -> tuple[str, str]:
+    async def _get_preview_from_archive(self, file_path: str, file_name: str, preview_config: dict = None) -> tuple[str, str]:
         """通用压缩包预览方法，支持多种格式"""
         if preview_config is None:
             preview_config = {}

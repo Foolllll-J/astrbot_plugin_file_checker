@@ -211,7 +211,6 @@ class GroupFileCheckerPlugin(Star):
 
             # 4. PDF 预览图生成
             pdf_preview_images = []
-            pdf_temp_path_cleaned = False  # 标记 PDF_PATH 临时文件是否已清理
             if preview_text.startswith('PDF_PATH:'):
                 # 压缩包内返回的 PDF 路径，需要清理
                 pdf_preview_file = preview_text[9:]  # 去掉 'PDF_PATH:' 前缀
@@ -224,7 +223,6 @@ class GroupFileCheckerPlugin(Star):
                     # 生成预览图后立即清理 PDF 临时文件
                     try:
                         os.remove(pdf_preview_file)
-                        pdf_temp_path_cleaned = True
                         logger.debug(f"[{group_id}] 🗑️ 已清理压缩包内 PDF 临时文件: {pdf_preview_file}")
                     except OSError as e:
                         logger.warning(f"[{group_id}] ⚠️ 删除 PDF 临时文件失败: {e}")
@@ -304,49 +302,51 @@ class GroupFileCheckerPlugin(Star):
         backup_config: dict
     ) -> bool:
         """聚合判断是否需要下载文件"""
-        # 预览生成需要
+        return (
+            self._needs_preview_download(file_name, file_size, preview_config) or
+            self._needs_media_download(file_name, file_size, preview_config) or
+            self._needs_repack_download(file_name, repack_config) or
+            self._needs_backup_download(file_name, backup_config)
+        )
+
+    def _needs_preview_download(self, file_name: str, file_size: Optional[int], preview_config: dict) -> bool:
+        """判断是否需要为预览下载文件"""
         if self.preview._should_download_for_preview(file_name, file_size, preview_config):
             return True
-
-        # PDF 预览需要
         if self.preview._is_pdf_file(file_name) and preview_config.get("pdf_preview_pages", 0) > 0:
             return True
+        return False
 
-        # 视频转换需要
+    def _needs_media_download(self, file_name: str, file_size: Optional[int], preview_config: dict) -> bool:
+        """判断是否需要为媒体转换下载文件"""
         if self.preview._is_video_file(file_name):
             limit = preview_config.get("auto_convert_video_threshold_mb", 0)
             if limit > 0 and file_size and (file_size / (1024*1024)) <= limit:
                 return True
-
-        # 图片转换需要
         if self.preview._is_image_file(file_name) and preview_config.get("enable_auto_convert_image", False):
             if file_size and (file_size / (1024*1024)) <= self.image_convert_max_size_mb:
                 return True
+        return False
 
-        # 补档需要：检查文件后缀是否在补档配置的后缀列表中
+    def _needs_repack_download(self, file_name: str, repack_config: dict) -> bool:
+        """判断是否需要为补档下载文件"""
         repack_extensions_str = repack_config.get("repack_file_extensions", "").strip()
         if repack_extensions_str:
             repack_file_extensions = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
             file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
-            if file_ext in repack_file_extensions:
-                return True
-        else:
-            # 未配置后缀限制时，默认需要
-            return True
+            return file_ext in repack_file_extensions
+        return True  # 未配置后缀限制时，默认需要
 
-        # 备份需要：只要配置了 target_sid 且后缀匹配，就下载
-        if backup_config and backup_config.get("target_sid"):
-            backup_ext_str = backup_config.get("backup_extensions", "").strip()
-            if backup_ext_str:
-                backup_ext_list = [ext.strip().lower() for ext in backup_ext_str.split(",") if ext.strip()]
-                file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
-                if file_ext in backup_ext_list:
-                    return True
-            else:
-                # 未配置后缀限制，所有文件都备份
-                return True
-
-        return False
+    def _needs_backup_download(self, file_name: str, backup_config: dict) -> bool:
+        """判断是否需要为备份下载文件"""
+        if not backup_config or not backup_config.get("target_sid"):
+            return False
+        backup_ext_str = backup_config.get("backup_extensions", "").strip()
+        if backup_ext_str:
+            backup_ext_list = [ext.strip().lower() for ext in backup_ext_str.split(",") if ext.strip()]
+            file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
+            return file_ext in backup_ext_list
+        return True  # 未配置后缀限制，所有文件都备份
 
     async def _delayed_cleanup_local_path(self, local_path: str, delay: int, group_id: int):
         """独立清理任务：等待指定时间后清理预检下载的本地文件"""
