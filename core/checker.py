@@ -299,6 +299,12 @@ class CheckerManager:
         logger.debug(f"[{group_id}] [阶段二] 开始延时复核: '{file_name}'")
 
         is_still_valid = await self._check_validity_via_gfs(event, file_id)
+        if is_still_valid:
+            return
+
+        # 发现一次失效后，等待 1 秒再做二次确认，避免瞬时波动误判
+        await asyncio.sleep(1)
+        is_still_valid = await self._check_validity_via_gfs(event, file_id)
 
         if not is_still_valid:
             # 报告失效前再次检查原消息（或补档通知）是否还在
@@ -330,7 +336,7 @@ class CheckerManager:
                     logger.debug(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
 
                 # 备份（仅备份失效文件模式，复核阶段也需要备份）
-                if backup_config and backup_config.get("target_sid"):
+                if backup_config and backup_config.get("target_sid") and backup_config.get("only_invalid", False):
                     await backup_file_to_session(self.plugin.context, file_name, backup_config, local_path)
 
             except Exception as send_e:

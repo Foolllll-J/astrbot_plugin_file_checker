@@ -181,7 +181,10 @@ class GroupFileCheckerPlugin(Star):
             return
 
         is_valid = await self.checker._check_validity_via_gfs(event, file_id)
-        enable_emoji = check_config.get("enable_emoji", True)
+        if not is_valid:
+            await asyncio.sleep(1)
+            retry_valid = await self.checker._check_validity_via_gfs(event, file_id)
+            is_valid = retry_valid
 
         # 统一文件生命周期管理：集中判断、统一下载、统一清理
         local_path: Optional[str] = None
