@@ -279,7 +279,7 @@ class GroupFileCheckerPlugin(Star):
 
             else:
                 # 文件失效，触发通知、补档和备份
-                if backup_config and backup_config.get("target_sid") and backup_config.get("only_invalid", False):
+                if backup_config and backup_config.get("target_sid"):
                     await backup_file_to_session(self.context, file_name, backup_config, local_path)
 
                 async for msg in self.checker.handle_invalid_file(
