@@ -299,8 +299,6 @@ class CheckerManager:
         logger.debug(f"[{group_id}] [阶段二] 开始延时复核: '{file_name}'")
 
         is_still_valid = await self._check_validity_via_gfs(event, file_id)
-        if is_still_valid:
-            return
 
         # 发现一次失效后，等待 1 秒再做二次确认，避免瞬时波动误判
         await asyncio.sleep(1)
@@ -309,6 +307,12 @@ class CheckerManager:
         if not is_still_valid:
             # 报告失效前再次检查原消息（或补档通知）是否还在
             if not await is_msg_still_available(event, target_msg_id):
+                return
+
+            # 补档发送后的文件复核不稳定，只记录日志不主动回复
+            is_repack_file = file_component is None
+            if is_repack_file:
+                logger.warning(f"⚠️ [{group_id}] [阶段二] 检测到补档文件 '{file_name}' 复核可能失效，检测结果不稳定，仅记录日志。")
                 return
 
             enable_emoji = check_config.get("enable_emoji", True)
@@ -341,6 +345,7 @@ class CheckerManager:
 
             except Exception as send_e:
                 logger.error(f"[{group_id}] [阶段二] 回复失效通知时再次发生错误: {send_e}")
+
         else:
             logger.debug(f"✅ [{group_id}] [阶段二] 文件 '{file_name}' 延时复核通过，保持沉默。")
 
