@@ -4,12 +4,34 @@ import time
 import subprocess
 import re
 from typing import List, Dict, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from .utils import is_msg_still_available, react_to_msg, get_group_config, build_notification_text, backup_file_to_session
+
+
+DUPLICATE_TIMESTAMP_TOLERANCE_SECONDS = 20
+
+
+def _mask_url_for_log(url: str) -> str:
+    if not url:
+        return url
+
+    try:
+        parts = urlsplit(url)
+        masked_query = "<masked>" if parts.query else ""
+        masked_fragment = "<masked>" if parts.fragment else ""
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, masked_query, masked_fragment))
+    except Exception:
+        return "<unparseable-url>"
+
+
+def _is_known_invalid_file_error(error: Exception) -> bool:
+    error_text = str(error)
+    return "文件下载失败（-134）" in error_text or "code=-134" in error_text
 
 
 class CheckerManager:
@@ -143,7 +165,7 @@ class CheckerManager:
             if file_modify_time is not None:
                 file_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_modify_time))
                 
-                if abs(file_modify_time - upload_time) <= 2:
+                if abs(file_modify_time - upload_time) <= DUPLICATE_TIMESTAMP_TOLERANCE_SECONDS:
                     removed_files.append(f)
                 else:
                     existing_files.append(f)
@@ -275,9 +297,28 @@ class CheckerManager:
             assert isinstance(event, AiocqhttpMessageEvent)
             client = event.bot
             url_result = await client.api.call_action('get_group_file_url', group_id=group_id, file_id=file_id)
-            return bool(url_result and url_result.get('url'))
-        except Exception:
-            return False
+            masked_result = url_result
+            if isinstance(url_result, dict) and isinstance(url_result.get('url'), str):
+                masked_result = dict(url_result)
+                masked_result['url'] = _mask_url_for_log(url_result['url'])
+
+            if isinstance(url_result, dict) and url_result.get('url'):
+                return True
+
+            logger.warning(
+                f"[{group_id}] 文件有效性检查返回非失效特征响应，按有效处理: "
+                f"file_id={file_id}, response_type={type(url_result).__name__}, response={masked_result}"
+            )
+            return True
+        except Exception as e:
+            if _is_known_invalid_file_error(e):
+                return False
+
+            logger.warning(
+                f"[{group_id}] 文件有效性检查异常但未命中失效特征，按有效处理: file_id={file_id}, "
+                f"error_type={type(e).__name__}, error={e}"
+            )
+            return True
 
     async def _task_delayed_recheck(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, preview_text: str, custom_msg_id: str | None = None, upload_time: Optional[int] = None, check_config: dict = None, repack_config: dict = None, backup_config: dict = None, local_path: Optional[str] = None):
         """延时复核任务"""
@@ -300,9 +341,10 @@ class CheckerManager:
 
         is_still_valid = await self._check_validity_via_gfs(event, file_id)
 
-        # 发现一次失效后，等待 1 秒再做二次确认，避免瞬时波动误判
-        await asyncio.sleep(1)
-        is_still_valid = await self._check_validity_via_gfs(event, file_id)
+        # 仅在首次检查失败时做二次确认，避免瞬时波动把有效文件误判为失效
+        if not is_still_valid:
+            await asyncio.sleep(1)
+            is_still_valid = await self._check_validity_via_gfs(event, file_id)
 
         if not is_still_valid:
             # 报告失效前再次检查原消息（或补档通知）是否还在
