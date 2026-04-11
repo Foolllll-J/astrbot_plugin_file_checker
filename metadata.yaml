@@ -1,7 +1,7 @@
 name: astrbot_plugin_file_checker
 display_name: QQ 文件预览
 desc: 对 QQ 群中新上传的群文件进行有效性检查和内容预览，同时支持文件查重、失效补档与转发备份功能。
-version: v2.0.1
+version: v2.0.2
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_file_checker
 support_platforms:

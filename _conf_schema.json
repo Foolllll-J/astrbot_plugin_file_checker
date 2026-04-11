@@ -56,19 +56,19 @@
                     },
                     "pre_check_delay_seconds": {
                         "description": "预检延时 (秒)",
-                        "hint": "收到文件后，等待多少秒再进行即时检查。给协议端留出上传时间，建议 3-10 秒。",
+                        "hint": "新文件上传后，等待多少秒后进行即时检查，建议 3-10 秒。",
                         "type": "int",
-                        "default": 5
+                        "default": 3
                     },
                     "check_delay_seconds": {
                         "description": "复核间隔时间 (秒)",
-                        "hint": "即时检查通过后，再等待多少秒进行时效性复核，用于检测后续是否失效。",
+                        "hint": "即时检查通过后，再等待多少秒进行复核，用于检测后续是否失效。",
                         "type": "int",
                         "default": 300
                     },
                     "enable_duplicate_check": {
                         "description": "启用重复文件检查",
-                        "hint": "开启后，新文件上传时将扫描群文件，若大小完全相同则提醒重复。",
+                        "hint": "开启后，新文件上传时将扫描群文件，若有大小完全相同的旧文件将提醒重复并跳过后续处理。",
                         "type": "bool",
                         "default": false
                     },
