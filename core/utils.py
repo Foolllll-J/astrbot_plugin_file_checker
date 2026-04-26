@@ -32,6 +32,12 @@ async def is_msg_still_available(event: AstrMessageEvent, msg_id: str) -> bool:
         logger.debug(f"[FileChecker] get_msg 调用异常但按可用处理: msg_id={message_id}, err={e}")
         return True
 
+    if isinstance(detail, dict):
+        msg_status = detail.get("status")
+        if msg_status == "deleted":
+            logger.debug(f"[FileChecker] get_msg status=deleted，判定消息已撤回: msg_id={message_id}")
+            return False
+
     if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
         detail = detail["data"]
 

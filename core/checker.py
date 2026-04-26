@@ -34,6 +34,28 @@ def _is_known_invalid_file_error(error: Exception) -> bool:
     return "文件下载失败（-134）" in error_text or "code=-134" in error_text
 
 
+def _normalize_action_payload(result):
+    if isinstance(result, dict) and isinstance(result.get("data"), dict):
+        return result.get("data", {})
+    return result if isinstance(result, dict) else {}
+
+
+def _is_ob11_action_success(result) -> bool:
+    return isinstance(result, dict) and result.get("status") == "ok" and result.get("retcode") == 0
+
+
+def _is_llbot_action_success(result) -> bool:
+    if result is None:
+        return True
+    if not isinstance(result, dict):
+        return False
+    if _is_ob11_action_success(result):
+        return True
+    if result.get("status") == "failed":
+        return False
+    return True
+
+
 class CheckerManager:
     def __init__(self, plugin_instance):
         self.plugin = plugin_instance
@@ -48,8 +70,11 @@ class CheckerManager:
         try:
             client = event.bot
             delete_result = await client.api.call_action('delete_group_file', group_id=group_id, file_id=file_id)
-            
-            if delete_result and delete_result.get('transGroupFileResult', {}).get('result', {}).get('retCode') == 0:
+            if self.plugin._is_llbot:
+                if _is_llbot_action_success(delete_result):
+                    logger.info(f"[{group_id}] ✅ 成功删除群文件: {file_name}")
+                    return True
+            elif delete_result and delete_result.get('transGroupFileResult', {}).get('result', {}).get('retCode') == 0:
                 logger.info(f"[{group_id}] ✅ 成功删除群文件: {file_name}")
                 return True
             else:
@@ -74,16 +99,20 @@ class CheckerManager:
                 if current_folder_id == '/':
                     result = await client.api.call_action('get_group_root_files', group_id=group_id)
                 else:
-                    result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id, file_count=1000)
-                
-                if not isinstance(result, dict):
+                    if self.plugin._is_llbot:
+                        result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id)
+                    else:
+                        result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id, file_count=1000)
+
+                payload = _normalize_action_payload(result)
+                if not isinstance(payload, dict):
                     continue
                 
-                for file_info in result.get('files', []):
+                for file_info in payload.get('files', []):
                     if file_info.get('file_name') == file_name:
                         matched_files.append(file_info)
                 
-                for folder_info in result.get('folders', []):
+                for folder_info in payload.get('folders', []):
                     folders_to_scan.append(folder_info)
             
             if not matched_files:
@@ -131,17 +160,21 @@ class CheckerManager:
                 if current_folder_id == '/':
                     result = await client.api.call_action('get_group_root_files', group_id=group_id)
                 else:
-                    result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id, file_count=1000)
+                    if self.plugin._is_llbot:
+                        result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id)
+                    else:
+                        result = await client.api.call_action('get_group_files_by_folder', group_id=group_id, folder_id=current_folder_id, file_count=1000)
 
-                if not isinstance(result, dict):
+                payload = _normalize_action_payload(result)
+                if not isinstance(payload, dict):
                     logger.warning(f"[{group_id}] API返回了意料之外的格式。")
                     continue
                 
-                for file_info in result.get('files', []):
+                for file_info in payload.get('files', []):
                     file_info['parent_folder_name'] = current_folder_name
                     all_files_dict[file_info.get('file_id')] = file_info
                 
-                for folder_info in result.get('folders', []):
+                for folder_info in payload.get('folders', []):
                     folders_to_scan.append(folder_info)
 
             except Exception as e:
@@ -297,12 +330,13 @@ class CheckerManager:
             assert isinstance(event, AiocqhttpMessageEvent)
             client = event.bot
             url_result = await client.api.call_action('get_group_file_url', group_id=group_id, file_id=file_id)
-            masked_result = url_result
-            if isinstance(url_result, dict) and isinstance(url_result.get('url'), str):
-                masked_result = dict(url_result)
-                masked_result['url'] = _mask_url_for_log(url_result['url'])
+            payload = _normalize_action_payload(url_result)
+            masked_result = payload if payload else url_result
+            if isinstance(masked_result, dict) and isinstance(masked_result.get('url'), str):
+                masked_result = dict(masked_result)
+                masked_result['url'] = _mask_url_for_log(masked_result['url'])
 
-            if isinstance(url_result, dict) and url_result.get('url'):
+            if isinstance(payload, dict) and payload.get('url'):
                 return True
 
             logger.warning(

@@ -16,6 +16,7 @@ class GroupFileCheckerPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict] = None):
         super().__init__(context)
         self.config = config if config else {}
+        self._is_llbot = False
 
         # 全局配置
         global_settings = self.config.get("global_settings", {})
@@ -57,9 +58,39 @@ class GroupFileCheckerPlugin(Star):
         
         logger.info("QQ 文件预览插件已加载。")
 
+    async def initialize(self):
+        if not hasattr(self.context, "platform_manager"):
+            return
+
+        try:
+            platforms = self.context.platform_manager.get_insts()
+            for platform in platforms:
+                bot_client = None
+                if hasattr(platform, "get_client"):
+                    bot_client = platform.get_client()
+                elif hasattr(platform, "bot"):
+                    bot_client = platform.bot
+
+                if not bot_client or not hasattr(bot_client, "api"):
+                    continue
+
+                version_info = await bot_client.api.call_action("get_version_info")
+                app_name = None
+                if isinstance(version_info, dict):
+                    app_name = version_info.get("app_name")
+                self._is_llbot = app_name == "LLOneBot"
+                logger.info(
+                    f"[file_checker] 协议端探测结果: app_name={app_name or 'unknown'}, "
+                    f"backend={'llbot' if self._is_llbot else 'napcat'}"
+                )
+                return
+        except Exception as e:
+            self._is_llbot = False
+            logger.warning(f"[file_checker] 协议端探测失败，默认按 NapCat 处理: {e}")
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
-        """处理群消息事件"""
+        """处理群文件上传事件"""
         group_id = str(event.get_group_id())
         if self.group_whitelist and int(group_id) not in self.group_whitelist:
             return
@@ -99,13 +130,19 @@ class GroupFileCheckerPlugin(Star):
                             try:
                                 # 获取文件所属目录
                                 current_parent = data_dict.get("parent", "/")
-                                await event.bot.api.call_action(
+                                rename_result = await event.bot.api.call_action(
                                     "rename_group_file",
                                     group_id=int(group_id),
                                     file_id=file_id,
                                     current_parent_directory=current_parent,
                                     new_name=purified_file_name
                                 )
+                                if (
+                                    self._is_llbot
+                                    and isinstance(rename_result, dict)
+                                    and rename_result.get("status") == "failed"
+                                ):
+                                    raise RuntimeError(rename_result.get("wording") or "rename_group_file failed")
                                 logger.info(f"[{group_id}] 文件名已净化并重命名: {original_file_name} -> {purified_file_name}")
                                 file_name = purified_file_name  # 使用净化后的文件名继续处理
                             except Exception as e:
