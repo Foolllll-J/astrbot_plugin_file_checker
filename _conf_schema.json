@@ -15,6 +15,12 @@
                 "hint": "文件大小超过此值时，将完全跳过该文件的所有处理。设置为 0 则不限制。",
                 "type": "int",
                 "default": 100
+            },
+            "process_bot_files": {
+                "description": "处理 Bot 自身发送的文件",
+                "hint": "开启后，Bot 发送的文件也会走配置的完整处理流程。",
+                "type": "bool",
+                "default": false
             }
         }
     },

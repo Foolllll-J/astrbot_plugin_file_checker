@@ -7,6 +7,8 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
+from astrbot.core.pipeline.context_utils import call_event_hook
+from astrbot.core.star.star_handler import EventType
 
 from .core.utils import get_group_config, is_msg_still_available, react_to_msg, find_file_component, build_notification_text, purify_file_name, backup_file_to_session
 from .core.checker import CheckerManager
@@ -17,6 +19,7 @@ class GroupFileCheckerPlugin(Star):
         super().__init__(context)
         self.config = config if config else {}
         self._is_llbot = False
+        self._backend_client_id: int | None = None
 
         # 全局配置
         global_settings = self.config.get("global_settings", {})
@@ -58,39 +61,157 @@ class GroupFileCheckerPlugin(Star):
         
         logger.info("QQ 文件预览插件已加载。")
 
-    async def initialize(self):
-        if not hasattr(self.context, "platform_manager"):
+    @filter.on_decorating_result()
+    async def on_bot_sending_file(self, event: AstrMessageEvent):
+        """发送消息前：净化 Bot 发送的文件名，并预复制文件到插件目录"""
+        result = event.get_result()
+        if not result or not result.chain:
             return
 
-        try:
-            platforms = self.context.platform_manager.get_insts()
-            for platform in platforms:
-                bot_client = None
-                if hasattr(platform, "get_client"):
-                    bot_client = platform.get_client()
-                elif hasattr(platform, "bot"):
-                    bot_client = platform.bot
+        # 仅处理群聊消息，且检查白名单和全局开关
+        group_id = event.get_group_id()
+        if not group_id:
+            return
+        if self.group_whitelist and int(group_id) not in self.group_whitelist:
+            return
+        if not self.config.get("global_settings", {}).get("process_bot_files", False):
+            return
 
-                if not bot_client or not hasattr(bot_client, "api"):
+        for comp in result.chain:
+            if isinstance(comp, Comp.File):
+                # 文件名净化
+                group_id = str(event.get_group_id())
+                check_config = get_group_config(self.config, group_id, "check_module")
+                purify_rules = check_config.get("purify_rules", [])
+
+                original_name = comp.name
+                purified_name = purify_file_name(original_name, purify_rules)
+
+                if purified_name != original_name:
+                    comp.name = purified_name
+                    logger.info(f"[{group_id}] Bot 发送文件已净化: {original_name} -> {purified_name}")
+
+                enable_duplicate_check = check_config.get("enable_duplicate_check", False)
+                if enable_duplicate_check and comp.file and os.path.exists(comp.file):
+                    file_size = os.path.getsize(comp.file)
+                    existing_files = await self.checker._check_if_file_exists_by_size(
+                        event,
+                        comp.name,
+                        file_size,
+                        int(time.time())
+                    )
+                    if existing_files:
+                        event.set_extra(
+                            "_bot_duplicate_notice_text",
+                            self._build_duplicate_notice_text(comp.name, existing_files)
+                        )
+                        logger.info(
+                            f"[{group_id}] Bot 发送文件 '{comp.name}' 命中重复检查，跳过后续 filechecker 流程"
+                        )
+                        return
+
+                event.set_extra("_is_bot_sent_file", True)
+
+                # 预复制文件到插件目录，供发送后钩子使用（对齐用户文件的下载流程）
+                if comp.file and os.path.exists(comp.file):
+                    import shutil
+                    local_path = os.path.join(self.temp_dir, comp.name)
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                    shutil.copy2(comp.file, local_path)
+                    event.set_extra("_bot_file_local_path", local_path)
+                    logger.debug(f"[{group_id}] Bot 文件已预复制到插件目录: {local_path}")
+
+    @filter.after_message_sent()
+    async def on_bot_file_sent(self, event: AstrMessageEvent):
+        """发送消息后：启动 Bot 文件的检查流程"""
+        duplicate_notice_text = event.get_extra("_bot_duplicate_notice_text")
+        if duplicate_notice_text:
+            event.set_extra("_bot_duplicate_notice_text", None)
+            await self._send_result_with_hooks(
+                event,
+                event.chain_result([
+                    Comp.Reply(id=event.message_obj.message_id),
+                    Comp.Plain(duplicate_notice_text)
+                ])
+            )
+            return
+
+        if not event.get_extra("_is_bot_sent_file"):
+            return
+
+        if event.get_extra("_is_repack_file"):
+            logger.debug(f"[{event.get_group_id()}] 补档文件，跳过检查流程")
+            return
+        group_id = event.get_group_id()
+
+        result = event.get_result()
+        if not result or not result.chain:
+            return
+        check_config = get_group_config(self.config, group_id, "check_module")
+        preview_config = get_group_config(self.config, group_id, "preview_module")
+        repack_config = get_group_config(self.config, group_id, "repack_module")
+        backup_config = get_group_config(self.config, group_id, "backup_module")
+
+        for comp in result.chain:
+            if isinstance(comp, Comp.File):
+                file_name = comp.name
+                upload_time = int(time.time())
+                file_id = await self.checker._search_file_id_by_name(
+                    event,
+                    file_name,
+                    target_time=upload_time
+                )
+                if not file_id:
+                    logger.warning(f"[{group_id}] Bot 文件未找到: {file_name}")
                     continue
 
-                version_info = await bot_client.api.call_action("get_version_info")
-                app_name = None
-                if isinstance(version_info, dict):
-                    app_name = version_info.get("app_name")
-                self._is_llbot = app_name == "LLOneBot"
-                logger.info(
-                    f"[file_checker] 协议端探测结果: app_name={app_name or 'unknown'}, "
-                    f"backend={'llbot' if self._is_llbot else 'napcat'}"
-                )
-                return
+                # 获取发送前钩子预复制的本地路径
+                local_path = event.get_extra("_bot_file_local_path")
+                if not local_path:
+                    logger.debug(f"[{group_id}] Bot 文件 '{file_name}' 无预复制路径，跳过本地处理")
+
+                asyncio.create_task(self._send_file_check_flow_results(
+                    event,
+                    self._handle_file_check_flow(
+                        event, file_name, file_id, None, None, upload_time,
+                        check_config, preview_config, repack_config, backup_config,
+                        local_path=local_path,
+                        is_bot_file=True,
+                        target_msg_id=event.message_obj.message_id
+                    )
+                ))
+
+    async def _ensure_backend_detected(self, client) -> None:
+        if client is None or not hasattr(client, "api"):
+            return
+
+        client_id = id(client)
+        if self._backend_client_id == client_id:
+            return
+
+        self._backend_client_id = client_id
+        self._is_llbot = False
+
+        try:
+            version_info = await client.api.call_action("get_version_info")
+            app_name = None
+            if isinstance(version_info, dict):
+                app_name = version_info.get("app_name")
+                if app_name is None and isinstance(version_info.get("data"), dict):
+                    app_name = version_info["data"].get("app_name")
+            self._is_llbot = app_name == "LLOneBot"
+            logger.debug(
+                f"[file_checker] 懒探测协议端结果: app_name={app_name or 'unknown'}, "
+                f"backend={'llbot' if self._is_llbot else 'napcat'}"
+            )
         except Exception as e:
-            self._is_llbot = False
-            logger.warning(f"[file_checker] 协议端探测失败，默认按 NapCat 处理: {e}")
+            logger.warning(f"[file_checker] 懒探测协议端失败，默认按 NapCat 处理: {e}")
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """处理群文件上传事件"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         group_id = str(event.get_group_id())
         if self.group_whitelist and int(group_id) not in self.group_whitelist:
             return
@@ -167,24 +288,7 @@ class GroupFileCheckerPlugin(Star):
                         if enable_duplicate_check and file_size is not None:
                             existing_files = await self.checker._check_if_file_exists_by_size(event, file_name, file_size, upload_time)
                             if existing_files:
-                                reply_text = ""
-                                if len(existing_files) == 1:
-                                    f = existing_files[0]
-                                    reply_text = (
-                                        f"💡 提醒：您发送的文件「{file_name}」可能与群文件中的「{f.get('file_name')}」重复。\n"
-                                        f"  ↳ 上传者: {f.get('uploader_name', '未知')}\n"
-                                        f"  ↳ 修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))}\n"
-                                        f"  ↳ 所属文件夹: {f.get('parent_folder_name', '根目录')}"
-                                    )
-                                else:
-                                    reply_text = f"💡 提醒：您发送的文件「{file_name}」可能与群文件中以下 {len(existing_files)} 个文件重复：\n"
-                                    for idx, f in enumerate(existing_files, 1):
-                                        reply_text += (
-                                            f"\n{idx}. {f.get('file_name')}\n"
-                                            f"    ↳ 上传者: {f.get('uploader_name', '未知')}\n"
-                                            f"    ↳ 修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))}\n"
-                                            f"    ↳ 所属文件夹: {f.get('parent_folder_name', '根目录')}"
-                                        )
+                                reply_text = self._build_duplicate_notice_text(file_name, existing_files)
                                 yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(reply_text)])
                                 break
 
@@ -195,11 +299,69 @@ class GroupFileCheckerPlugin(Star):
         except Exception as e:
             logger.error(f"处理消息时发生致命错误: {e}", exc_info=True)
 
-    async def _handle_file_check_flow(self, event: AstrMessageEvent, file_name: str, file_id: str, file_component: Comp.File, file_size: Optional[int], upload_time: Optional[int], check_config: dict, preview_config: dict, repack_config: dict, backup_config: dict):
+    async def _send_file_check_flow_results(self, event: AstrMessageEvent, flow):
+        async for result in flow:
+            await self._send_result_with_hooks(event, result)
+
+    async def _send_result_with_hooks(self, event: AstrMessageEvent, result):
+        previous_result = event.get_result()
+        event.set_result(result)
+        try:
+            if await call_event_hook(event, EventType.OnDecoratingResultEvent):
+                return
+            decorated_result = event.get_result()
+            if not decorated_result or not decorated_result.chain:
+                return
+            await event.send(decorated_result.derive(decorated_result.chain))
+            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+        finally:
+            if previous_result is None:
+                event.clear_result()
+            else:
+                event.set_result(previous_result)
+
+    def _build_duplicate_notice_text(self, file_name: str, existing_files: list[dict]) -> str:
+        if len(existing_files) == 1:
+            f = existing_files[0]
+            return (
+                f"💡 提醒：您发送的文件「{file_name}」可能与群文件中的「{f.get('file_name')}」重复。\n"
+                f"  ↳ 上传者: {f.get('uploader_name', '未知')}\n"
+                f"  ↳ 修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))}\n"
+                f"  ↳ 所属文件夹: {f.get('parent_folder_name', '根目录')}"
+            )
+
+        reply_text = f"💡 提醒：您发送的文件「{file_name}」可能与群文件中以下 {len(existing_files)} 个文件重复：\n"
+        for idx, f in enumerate(existing_files, 1):
+            reply_text += (
+                f"\n{idx}. {f.get('file_name')}\n"
+                f"    ↳ 上传者: {f.get('uploader_name', '未知')}\n"
+                f"    ↳ 修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))}\n"
+                f"    ↳ 所属文件夹: {f.get('parent_folder_name', '根目录')}"
+            )
+        return reply_text
+
+    async def _handle_file_check_flow(
+        self,
+        event: AstrMessageEvent,
+        file_name: str,
+        file_id: str,
+        file_component: Optional[Comp.File],
+        file_size: Optional[int],
+        upload_time: Optional[int],
+        check_config: dict,
+        preview_config: dict,
+        repack_config: dict,
+        backup_config: dict,
+        *,
+        local_path: Optional[str] = None,
+        is_bot_file: bool = False,
+        target_msg_id: Optional[str] = None
+    ):
         group_id = int(event.get_group_id())
         sender_id = event.get_sender_id()
         self_id = event.get_self_id()
-        if sender_id == self_id:
+        target_msg_id = target_msg_id or event.message_obj.message_id
+        if not is_bot_file and sender_id == self_id:
             logger.debug(f"[{group_id}] 机器人发送的文件，直接跳过处理。")
             return
 
@@ -214,18 +376,17 @@ class GroupFileCheckerPlugin(Star):
         await asyncio.sleep(check_config.get("pre_check_delay_seconds", 5))
 
         # 消息存续检查
-        if not await is_msg_still_available(event, event.message_obj.message_id):
+        if not await is_msg_still_available(event, target_msg_id):
             return
 
         is_valid = await self.checker._check_validity_via_gfs(event, file_id)
-        enable_emoji = check_config.get("enable_emoji", True)
+        enable_emoji = check_config.get("enable_emoji", True) and not is_bot_file
         if not is_valid:
             await asyncio.sleep(1)
             retry_valid = await self.checker._check_validity_via_gfs(event, file_id)
             is_valid = retry_valid
 
         # 统一文件生命周期管理：集中判断、统一下载、统一清理
-        local_path: Optional[str] = None
         try:
             # 1. 聚合判断是否需要下载文件
             needs_download = self._should_download_file(
@@ -233,8 +394,9 @@ class GroupFileCheckerPlugin(Star):
             )
 
             # 2. 统一下载：先由框架下载到临时位置，再复制到插件 temp_dir
-            if needs_download:
+            if needs_download and not local_path:
                 async with self.download_semaphore:
+                    assert file_component is not None
                     framework_temp_path = await file_component.get_file()
                 # 复制到插件自己的 temp_dir，使用原始文件名，后续所有操作都针对此副本
                 import shutil
@@ -246,8 +408,12 @@ class GroupFileCheckerPlugin(Star):
                 logger.debug(f"[{group_id}] 文件已复制到插件 temp_dir: {local_path}")
 
             # 3. 预览生成
+            effective_file_size = file_size
+            if effective_file_size is None and local_path and os.path.exists(local_path):
+                effective_file_size = os.path.getsize(local_path)
+
             preview_text, extra_info = await self.preview._get_preview_for_file(
-                file_name, local_path, file_size, preview_config
+                file_name, local_path, effective_file_size, preview_config
             )
 
             # 4. PDF 预览图生成
@@ -276,21 +442,22 @@ class GroupFileCheckerPlugin(Star):
 
             if is_valid:
                 has_any_preview = bool(preview_text or pdf_preview_images)
-                await react_to_msg(event, "314" if has_any_preview else "320", enable_emoji)
+                if not is_bot_file:
+                    await react_to_msg(event, "314" if has_any_preview else "320", enable_emoji)
 
                 # 5. 自动转换媒体
                 if self.preview._is_video_file(file_name):
                     limit = preview_config.get("auto_convert_video_threshold_mb", 0)
-                    if limit > 0 and file_size and (file_size / (1024*1024)) <= limit:
+                    if limit > 0 and effective_file_size and (effective_file_size / (1024*1024)) <= limit:
                         async for r in self.preview._convert_file_to_media(
-                            event, file_name, file_size, local_path, "video"
+                            event, file_name, effective_file_size, local_path, "video"
                         ):
                             yield r
 
                 if self.preview._is_image_file(file_name) and preview_config.get("enable_auto_convert_image", False):
-                    if file_size and (file_size / (1024*1024)) <= self.image_convert_max_size_mb:
+                    if effective_file_size and (effective_file_size / (1024*1024)) <= self.image_convert_max_size_mb:
                         async for r in self.preview._convert_file_to_media(
-                            event, file_name, file_size, local_path, "image"
+                            event, file_name, effective_file_size, local_path, "image"
                         ):
                             yield r
 
@@ -303,7 +470,9 @@ class GroupFileCheckerPlugin(Star):
                         for msg in self.preview.send_pdf_preview(event, success_msg, pdf_preview_images):
                             yield msg
                     else:
-                        chain = [Comp.Reply(id=event.message_obj.message_id)]
+                        chain = []
+                        if not is_bot_file:
+                            chain.append(Comp.Reply(id=target_msg_id))
                         chain.append(Comp.Plain(success_msg))
                         yield event.chain_result(chain)
 
@@ -314,6 +483,7 @@ class GroupFileCheckerPlugin(Star):
                 # 8. 启动延时复核
                 asyncio.create_task(self.checker._task_delayed_recheck(
                     event, file_name, file_id, file_component, preview_text,
+                    custom_msg_id=target_msg_id,
                     upload_time=upload_time, check_config=check_config, repack_config=repack_config,
                     backup_config=backup_config, local_path=local_path
                 ))

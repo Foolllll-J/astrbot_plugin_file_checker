@@ -279,6 +279,9 @@ class CheckerManager:
             # 补档通知使用框架的消息发送方式
             yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(reply_text)])
 
+            # 标记为补档文件，防止发送后钩子循环处理
+            event.set_extra("_is_repack_file", True)
+
             # 发送文件并获取文件消息的 ID
             if isinstance(event, AiocqhttpMessageEvent):
                 try:
@@ -385,8 +388,8 @@ class CheckerManager:
             if not await is_msg_still_available(event, target_msg_id):
                 return
 
-            # 补档发送后的文件复核不稳定，只记录日志不主动回复
-            is_repack_file = file_component is None
+            # 补档文件不触发再次补档（防止循环）
+            is_repack_file = bool(event.get_extra("_is_repack_file"))
             if is_repack_file:
                 logger.warning(f"⚠️ [{group_id}] [阶段二] 检测到补档文件 '{file_name}' 复核可能失效，检测结果不稳定，仅记录日志。")
                 return
@@ -398,8 +401,9 @@ class CheckerManager:
                 failure_message = f"❌ 经 {check_delay_seconds} 秒后复核，您发送的文件「{file_name}」已失效。"
                 await event.send(MessageChain([Comp.Reply(id=target_msg_id), Comp.Plain(failure_message)]))
 
-                # 只有在 file_component 不为 None 时才尝试补档
-                if file_component:
+                # 文件失效时，只要 local_path 可用就尝试补档
+                # file_component 不为 None（用户文件）或有 local_path（Bot 文件预复制）
+                if file_component or local_path:
                     repack_extensions_str = repack_config.get("repack_file_extensions", "").strip()
                     repack_file_extensions = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
 
@@ -412,8 +416,8 @@ class CheckerManager:
                         # 补档后删除已失效的原文件
                         logger.info(f"[{group_id}] 补档完成，已创建 10 分钟后的延迟删除任务")
                         asyncio.create_task(self._delayed_delete_file(event, file_name, 600, upload_time))
-                elif not file_component:
-                    logger.debug(f"[{group_id}] 该文件为补档后的文件，无法再次补档")
+                elif not file_component and not local_path:
+                    logger.debug(f"[{group_id}] 该文件无 file_component 且无 local_path，无法再次补档")
 
                 # 备份（仅备份失效文件模式，复核阶段也需要备份）
                 if backup_config and backup_config.get("target_sid") and backup_config.get("only_invalid", False):
@@ -472,8 +476,8 @@ class CheckerManager:
         else:
             yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(failure_message)])
 
-        # 补档逻辑
-        if file_component:
+        # 文件失效时，只要 file_component 或 local_path 可用就尝试补档
+        if file_component or local_path:
             repack_extensions_str = repack_config.get("repack_file_extensions", "").strip()
             repack_file_extensions = [ext.strip().lower() for ext in repack_extensions_str.split(",") if ext.strip()]
             file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
