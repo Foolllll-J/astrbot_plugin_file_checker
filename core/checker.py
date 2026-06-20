@@ -180,36 +180,31 @@ class CheckerManager:
             except Exception as e:
                 logger.error(f"[{group_id}] 遍历文件夹 '{current_folder['folder_name']}' 时出错: {e}", exc_info=True)
         
-        logger.debug(f"[{group_id}] 遍历完成，共找到 {len(all_files_dict)} 个文件。")
-        
         possible_duplicates = []
         for file_info in all_files_dict.values():
             if file_info.get('file_size') == file_size:
                 possible_duplicates.append(file_info)
-
-        logger.debug(f"[{group_id}] 共找到 {len(possible_duplicates)} 个大小匹配的候选项。")
         
         existing_files = []
         removed_files = []
         
         for f in possible_duplicates:
             file_modify_time = f.get('modify_time')
-            
+
             if file_modify_time is not None:
-                file_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_modify_time))
-                
                 if abs(file_modify_time - upload_time) <= DUPLICATE_TIMESTAMP_TOLERANCE_SECONDS:
                     removed_files.append(f)
                 else:
                     existing_files.append(f)
             else:
                 existing_files.append(f)
-
-        if removed_files:
-            logger.debug(f"[{group_id}] 已从候选项中排除自身文件，共 {len(removed_files)} 个。")
         
+        logger.debug(f"[{group_id}] 文件查重完成，共扫描 {len(all_files_dict)} 个文件，"
+                     f"候选项 {len(possible_duplicates)} 个，"
+                     f"排除自身 {len(removed_files)} 个，"
+                     f"最终确认 {len(existing_files)} 个重复文件。")
+
         if existing_files:
-            logger.debug(f"[{group_id}] 最终确认 {len(existing_files)} 个真正的重复文件。")
             for f in existing_files:
                 modify_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))
                 logger.debug(
@@ -220,8 +215,6 @@ class CheckerManager:
                     f"    修改时间: {modify_time_str}\n"
                     f"    所属文件夹: {f.get('parent_folder_name', '根目录')}"
                 )
-        else:
-            logger.debug(f"[{group_id}] 未找到真正的重复文件。")
         
         return existing_files
 

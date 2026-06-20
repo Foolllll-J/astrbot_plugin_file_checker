@@ -30,6 +30,7 @@
         "hint": "配置文件的有效性检查、重复检查及通知行为。",
         "default": [
             {
+                "__template_key": "default",
                 "group_id": [],
                 "enable_emoji": true,
                 "notify_on_success": true,
@@ -94,6 +95,7 @@
         "hint": "配置文本、压缩包、PDF的预览以及媒体文件的转换发送规则。",
         "default": [
             {
+                "__template_key": "default",
                 "group_id": [],
                 "preview_length": 500,
                 "pdf_preview_pages": 0,
@@ -159,6 +161,7 @@
         "hint": "配置文件失效后的自动补档逻辑。",
         "default": [
             {
+                "__template_key": "default",
                 "group_id": [],
                 "repack_file_extensions": "",
                 "repack_zip_password": ""
@@ -196,6 +199,7 @@
         "hint": "配置文件备份逻辑，可将文件转发到目标会话。",
         "default": [
             {
+                "__template_key": "default",
                 "group_id": [],
                 "target_sid": "",
                 "backup_extensions": "",

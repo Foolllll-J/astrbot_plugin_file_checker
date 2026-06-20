@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import os
@@ -6,6 +7,9 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 import astrbot.api.message_components as Comp
 
 logger = logging.getLogger("astrbot")
+
+DEFAULT_BACKUP_SEND_TIMEOUT_SECONDS = 90
+
 
 async def is_msg_still_available(event: AstrMessageEvent, msg_id: str) -> bool:
     """校验消息是否仍可获取"""
@@ -55,6 +59,7 @@ async def is_msg_still_available(event: AstrMessageEvent, msg_id: str) -> bool:
 
     return True
 
+
 async def react_to_msg(event: AstrMessageEvent, emoji_id: str, enable_emoji: bool):
     """贴表情回应（仅支持 aiocqhttp）"""
     if not enable_emoji or not isinstance(event, AiocqhttpMessageEvent):
@@ -66,7 +71,8 @@ async def react_to_msg(event: AstrMessageEvent, emoji_id: str, enable_emoji: boo
             emoji_id=int(emoji_id)
         )
     except Exception as e:
-        logger.warning(f"[FileChecker] 贴表情回应失败 (emoji_id={emoji_id}): {e}")
+        logger.warning(f"[FileChecker] 贴表情回应失败(emoji_id={emoji_id}): {e}")
+
 
 def get_group_config(config: dict, group_id: str, module_name: str) -> dict:
     """
@@ -77,16 +83,16 @@ def get_group_config(config: dict, group_id: str, module_name: str) -> dict:
     module_config = config.get(module_name, [])
     if not isinstance(module_config, list):
         return {}
-        
+
     # 1. 尝试寻找特定群的配置
     for item in module_config:
         target_group_ids = item.get("group_id", [])
         if isinstance(target_group_ids, str):
             target_group_ids = [target_group_ids] if target_group_ids else []
-        
+
         if str(group_id) in [str(gid) for gid in target_group_ids]:
             return item
-            
+
     # 2. 尝试寻找全局配置
     for item in module_config:
         target_group_ids = item.get("group_id", [])
@@ -95,12 +101,14 @@ def get_group_config(config: dict, group_id: str, module_name: str) -> dict:
 
     return {}
 
+
 def find_file_component(event: AstrMessageEvent):
     """从消息中找到文件组件"""
     for segment in event.get_messages():
         if isinstance(segment, Comp.File):
             return segment
     return None
+
 
 def purify_file_name(file_name: str, rules: list) -> str:
     """按正则规则净化文件名"""
@@ -118,6 +126,19 @@ def purify_file_name(file_name: str, rules: list) -> str:
             logger.warning(f"[FileChecker] 文件名净化规则无效: pattern={pattern}, error={e}")
 
     return result
+
+
+def _classify_backup_send_error(exc: Exception) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, FileNotFoundError):
+        return "file_missing"
+
+    error_text = str(exc).lower()
+    if any(token in error_text for token in ("session", "target", "chat not found", "peer_id_invalid")):
+        return "session_invalid"
+    return "other_error"
+
 
 async def backup_file_to_session(context, file_name: str, backup_config: dict, local_path: str) -> bool:
     """将文件备份到目标会话"""
@@ -143,12 +164,22 @@ async def backup_file_to_session(context, file_name: str, backup_config: dict, l
         from astrbot.api.event import MessageChain
         import astrbot.api.message_components as Comp
         chain = MessageChain(chain=[Comp.File(name=file_name, file=os.path.abspath(local_path))])
-        await context.send_message(target_sid, chain)
+
+        send_result = await asyncio.wait_for(
+            context.send_message(target_sid, chain),
+            timeout=DEFAULT_BACKUP_SEND_TIMEOUT_SECONDS,
+        )
+        if send_result is False:
+            logger.error(f"[FileChecker] 备份失败(session_invalid): target={target_sid}, file={file_name}")
+            return False
+
         logger.info(f"[FileChecker] 文件已备份到会话 {target_sid}: {file_name}")
         return True
     except Exception as e:
-        logger.error(f"[FileChecker] 备份失败: {e}")
+        error_type = _classify_backup_send_error(e)
+        logger.error(f"[FileChecker] 备份失败({error_type}): {e}")
         return False
+
 
 def build_notification_text(
     file_name: str,
