@@ -36,7 +36,7 @@
                 "notify_on_success": true,
                 "pre_check_delay_seconds": 5,
                 "check_delay_seconds": 300,
-                "enable_duplicate_check": false
+                "duplicate_check_strategy": "disabled"
             }
         ],
         "templates": {
@@ -73,11 +73,23 @@
                         "type": "int",
                         "default": 300
                     },
-                    "enable_duplicate_check": {
-                        "description": "启用重复文件检查",
-                        "hint": "开启后，新文件上传时将扫描群文件，若有大小完全相同的旧文件将提醒重复并跳过后续处理。",
-                        "type": "bool",
-                        "default": false
+                    "duplicate_check_strategy": {
+                        "description": "查重策略",
+                        "hint": "关闭则不查重；仅提醒则仅通知；删除旧文件则自动清理旧文件；删除新文件则延迟清理新文件。",
+                        "type": "string",
+                        "default": "disabled",
+                        "options": [
+                            "disabled",
+                            "notify_only",
+                            "delete_old",
+                            "delete_new"
+                        ],
+                        "labels": [
+                            "关闭",
+                            "仅提醒",
+                            "删除旧文件",
+                            "删除新文件"
+                        ]
                     },
                     "purify_rules": {
                         "description": "文件名净化规则",

@@ -36,3 +36,5 @@ config/
 # OS
 .DS_Store
 Thumbs.db
+
+tests/

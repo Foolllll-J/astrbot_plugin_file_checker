@@ -3,7 +3,9 @@ import logging
 import re
 import os
 from astrbot.api.event import AstrMessageEvent
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 import astrbot.api.message_components as Comp
 
 logger = logging.getLogger("astrbot")
@@ -30,31 +32,46 @@ async def is_msg_still_available(event: AstrMessageEvent, msg_id: str) -> bool:
         detail = await api.call_action("get_msg", message_id=message_id)
     except Exception as e:
         err_text = str(e).lower()
-        if any(k in err_text for k in ("not found", "not exist", "不存在", "撤回", "invalid")):
-            logger.debug(f"[FileChecker] get_msg 指示消息不可用/已撤回: msg_id={message_id}")
+        if any(
+            k in err_text
+            for k in ("not found", "not exist", "不存在", "撤回", "invalid")
+        ):
+            logger.debug(
+                f"[FileChecker] get_msg 指示消息不可用/已撤回: msg_id={message_id}"
+            )
             return False
-        logger.debug(f"[FileChecker] get_msg 调用异常但按可用处理: msg_id={message_id}, err={e}")
+        logger.debug(
+            f"[FileChecker] get_msg 调用异常但按可用处理: msg_id={message_id}, err={e}"
+        )
         return True
 
     if isinstance(detail, dict):
         msg_status = detail.get("status")
         if msg_status == "deleted":
-            logger.debug(f"[FileChecker] get_msg status=deleted，判定消息已撤回: msg_id={message_id}")
+            logger.debug(
+                f"[FileChecker] get_msg status=deleted，判定消息已撤回: msg_id={message_id}"
+            )
             return False
 
     if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
         detail = detail["data"]
 
     if not isinstance(detail, dict):
-        logger.debug(f"[FileChecker] get_msg 返回结构异常，判定不可用: msg_id={message_id}")
+        logger.debug(
+            f"[FileChecker] get_msg 返回结构异常，判定不可用: msg_id={message_id}"
+        )
         return False
 
     msg_content = detail.get("message")
     if msg_content is None:
-        logger.debug(f"[FileChecker] get_msg 未返回 message 字段，判定不可用: msg_id={message_id}")
+        logger.debug(
+            f"[FileChecker] get_msg 未返回 message 字段，判定不可用: msg_id={message_id}"
+        )
         return False
     if isinstance(msg_content, (list, str)) and len(msg_content) == 0:
-        logger.debug(f"[FileChecker] get_msg 返回空内容，判定不可用: msg_id={message_id}")
+        logger.debug(
+            f"[FileChecker] get_msg 返回空内容，判定不可用: msg_id={message_id}"
+        )
         return False
 
     return True
@@ -68,7 +85,7 @@ async def react_to_msg(event: AstrMessageEvent, emoji_id: str, enable_emoji: boo
         await event.bot.api.call_action(
             "set_msg_emoji_like",
             message_id=int(event.message_obj.message_id),
-            emoji_id=int(emoji_id)
+            emoji_id=int(emoji_id),
         )
     except Exception as e:
         logger.warning(f"[FileChecker] 贴表情回应失败(emoji_id={emoji_id}): {e}")
@@ -123,7 +140,9 @@ def purify_file_name(file_name: str, rules: list) -> str:
         try:
             result = re.sub(pattern, "", result)
         except re.error as e:
-            logger.warning(f"[FileChecker] 文件名净化规则无效: pattern={pattern}, error={e}")
+            logger.warning(
+                f"[FileChecker] 文件名净化规则无效: pattern={pattern}, error={e}"
+            )
 
     return result
 
@@ -135,12 +154,17 @@ def _classify_backup_send_error(exc: Exception) -> str:
         return "file_missing"
 
     error_text = str(exc).lower()
-    if any(token in error_text for token in ("session", "target", "chat not found", "peer_id_invalid")):
+    if any(
+        token in error_text
+        for token in ("session", "target", "chat not found", "peer_id_invalid")
+    ):
         return "session_invalid"
     return "other_error"
 
 
-async def backup_file_to_session(context, file_name: str, backup_config: dict, local_path: str) -> bool:
+async def backup_file_to_session(
+    context, file_name: str, backup_config: dict, local_path: str
+) -> bool:
     """将文件备份到目标会话"""
     if not backup_config or not isinstance(backup_config, dict):
         return False
@@ -151,8 +175,10 @@ async def backup_file_to_session(context, file_name: str, backup_config: dict, l
 
     backup_extensions = backup_config.get("backup_extensions", "").strip()
     if backup_extensions:
-        ext_list = [ext.strip().lower() for ext in backup_extensions.split(",") if ext.strip()]
-        file_ext = os.path.splitext(file_name)[1].lower().lstrip('.')
+        ext_list = [
+            ext.strip().lower() for ext in backup_extensions.split(",") if ext.strip()
+        ]
+        file_ext = os.path.splitext(file_name)[1].lower().lstrip(".")
         if file_ext not in ext_list:
             return False
 
@@ -163,14 +189,19 @@ async def backup_file_to_session(context, file_name: str, backup_config: dict, l
     try:
         from astrbot.api.event import MessageChain
         import astrbot.api.message_components as Comp
-        chain = MessageChain(chain=[Comp.File(name=file_name, file=os.path.abspath(local_path))])
+
+        chain = MessageChain(
+            chain=[Comp.File(name=file_name, file=os.path.abspath(local_path))]
+        )
 
         send_result = await asyncio.wait_for(
             context.send_message(target_sid, chain),
             timeout=DEFAULT_BACKUP_SEND_TIMEOUT_SECONDS,
         )
         if send_result is False:
-            logger.error(f"[FileChecker] 备份失败(session_invalid): target={target_sid}, file={file_name}")
+            logger.error(
+                f"[FileChecker] 备份失败(session_invalid): target={target_sid}, file={file_name}"
+            )
             return False
 
         logger.info(f"[FileChecker] 文件已备份到会话 {target_sid}: {file_name}")
@@ -186,7 +217,7 @@ def build_notification_text(
     is_success: bool,
     preview_text: str = "",
     extra_info: str = "",
-    preview_config: dict = None
+    preview_config: dict = None,
 ) -> str:
     """构建通知文案"""
     if preview_config is None:
