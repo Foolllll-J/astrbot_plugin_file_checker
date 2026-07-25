@@ -1,5 +1,11 @@
 # 📝 更新日志
 
+## v2.2.1 (2026-07-25)
+
+* 新增 get_cached_file_listing 公共 API，供外部插件获取群文件缓存
+* 重构 内部缓存方法抽取，剥离 AstrMessageEvent 依赖
+* 新增 flat_index 增加 relative_path 字段
+
 ## v2.2.0 (2026-07-20)
 
 * 重构 查重策略配置，支持仅通知/自动清理旧文件/延迟删除新文件

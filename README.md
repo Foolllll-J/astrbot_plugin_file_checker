@@ -123,6 +123,48 @@
 
 ---
 
+## 🔌 外部插件调用
+
+本插件通过 `get_cached_file_listing(group_id, client)` 暴露群文件索引缓存，供其他 AstrBot 插件调用，避免重复的递归 API 扫描。
+
+```python
+from astrbot.api.star import Context, Star
+
+class YourPlugin(Star):
+    async def some_method(self, group_id: int):
+        meta = self.context.get_registered_star("astrbot_plugin_file_checker")
+        if not meta or not meta.star_cls:
+            return  # file_checker 未安装
+        
+        if not hasattr(meta.star_cls, "get_cached_file_listing"):
+            return  # 版本过旧
+
+        flat_index = await meta.star_cls.get_cached_file_listing(
+            group_id, self.bot  # 或 event.bot
+        )
+        if flat_index:
+            # flat_index: { file_id: { file_name, file_size, relative_path, ... } }
+            for fid, info in flat_index.items():
+                print(info["file_name"], info["file_size"])
+```
+
+返回内容说明：
+
+| 字段 | 说明 |
+|---|---|
+| `file_id` | 文件 ID |
+| `file_name` | 文件名 |
+| `file_size` | 文件大小（字节） |
+| `modify_time` | 最后修改时间戳 |
+| `parent_folder_id` | 父文件夹 ID |
+| `parent_folder_name` | 父文件夹名 |
+| `relative_path` | 相对路径（根目录文件直接为文件名） |
+| `uploader_name` | 上传者昵称 |
+
+> 缓存由本插件自动维护，首次调用或缓存过期时会发起一次轻量 API 请求进行增量刷新，不会触发额外的全量扫描。
+
+---
+
 ## 📝 更新日志
 
 详见 [CHANGELOG](CHANGELOG.md)

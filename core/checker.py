@@ -181,10 +181,8 @@ class CheckerManager:
             mt = max(mt, fol.get("modify_time", 0) or 0)
         return mt
 
-    async def _do_full_scan(self, event: AstrMessageEvent) -> dict:
-        """全量扫描所有文件夹，返回完整的缓存数据"""
-        group_id = int(event.get_group_id())
-        client = event.bot
+    async def _do_full_scan_group(self, group_id: int, client, is_llbot: bool) -> dict:
+        """全量扫描所有文件夹，返回完整的缓存数据（client 版本，供外部/内部共用）"""
         gid = str(group_id)
 
         logger.info(f"[{gid}] [全量扫描] 开始扫描所有文件夹")
@@ -214,7 +212,7 @@ class CheckerManager:
                     if first_root_result is None:
                         first_root_result = result
                 else:
-                    if self.plugin._is_llbot:
+                    if is_llbot:
                         result = await client.api.call_action(
                             "get_group_files_by_folder",
                             group_id=group_id,
@@ -243,15 +241,20 @@ class CheckerManager:
                     fid = file_info.get("file_id")
                     if not fid:
                         continue
+                    fname = file_info.get("file_name", "")
+                    rpath = (
+                        os.path.join(cur_name, fname) if cur_name != "根目录" else fname
+                    )
                     flat_index[fid] = {
                         "file_id": fid,
-                        "file_name": file_info.get("file_name"),
+                        "file_name": fname,
                         "file_size": file_info.get("file_size"),
                         "modify_time": file_info.get("modify_time"),
                         "busid": file_info.get("busid"),
                         "uploader_name": file_info.get("uploader_name"),
                         "parent_folder_id": cur_id,
                         "parent_folder_name": cur_name,
+                        "relative_path": rpath,
                     }
                     if cur_id == "/":
                         root_files_sig[fid] = file_info.get("modify_time")
@@ -302,6 +305,12 @@ class CheckerManager:
 
         return result
 
+    async def _do_full_scan(self, event: AstrMessageEvent) -> dict:
+        """全量扫描（event 版本，委派给 _do_full_scan_group）"""
+        return await self._do_full_scan_group(
+            int(event.get_group_id()), event.bot, self.plugin._is_llbot
+        )
+
     async def _sync_single_folder(
         self, group_id: int, folder_id: str, call_action, is_llbot: bool, cached: dict
     ):
@@ -348,15 +357,22 @@ class CheckerManager:
                     continue
                 current_file_ids.add(fid)
                 was_new = fid not in flat_index
+                fname = file_info.get("file_name", "")
+                rpath = (
+                    os.path.join(current_folder_name, fname)
+                    if current_folder_name != "根目录"
+                    else fname
+                )
                 flat_index[fid] = {
                     "file_id": fid,
-                    "file_name": file_info.get("file_name"),
+                    "file_name": fname,
                     "file_size": file_info.get("file_size"),
                     "modify_time": file_info.get("modify_time"),
                     "busid": file_info.get("busid"),
                     "uploader_name": file_info.get("uploader_name"),
                     "parent_folder_id": folder_id,
                     "parent_folder_name": current_folder_name,
+                    "relative_path": rpath,
                 }
                 if was_new:
                     added += 1
@@ -409,28 +425,28 @@ class CheckerManager:
                 exc_info=True,
             )
 
-    async def _ensure_cache_fresh(self, event: AstrMessageEvent):
+    async def _ensure_cache_fresh_group(
+        self, group_id: int, client, is_llbot: bool
+    ) -> tuple:
         """
-        确保缓存新鲜。
-        缓存不存在 → 返回 (None, False) （caller 做全量扫描）
+        确保缓存新鲜（client 版本，供外部/内部共用）。
+        缓存不存在 → 返回 (None, False)
         缓存存在 → 1 次 get_group_root_files 对比签名，按需增量刷新。
         返回 (flat_index_or_None, changed: bool)
         """
-        group_id = str(event.get_group_id())
-        int_group_id = int(group_id)
+        gid = str(group_id)
 
-        if group_id not in self._cache:
+        if gid not in self._cache:
             return None, False
 
-        cached = self._cache[group_id]
+        cached = self._cache[gid]
 
         try:
-            client = event.bot
 
             async def call_action_fn(name: str, **kw):
                 return await client.api.call_action(name, **kw)
 
-            result = await call_action_fn("get_group_root_files", group_id=int_group_id)
+            result = await call_action_fn("get_group_root_files", group_id=group_id)
             payload = _normalize_action_payload(result)
             if not isinstance(payload, dict):
                 return cached.get("flat_index", {}), False
@@ -439,20 +455,31 @@ class CheckerManager:
 
             if has_mt:
                 return await self._ensure_fresh_mt(
-                    cached, payload, int_group_id, call_action_fn
+                    cached, payload, group_id, call_action_fn, is_llbot
                 )
             else:
                 return await self._ensure_fresh_fallback(
-                    cached, payload, int_group_id, call_action_fn
+                    cached, payload, group_id, call_action_fn, is_llbot
                 )
 
         except Exception as e:
-            logger.error(f"[{group_id}] 缓存新鲜度检查出错: {e}", exc_info=True)
+            logger.error(f"[{gid}] 缓存新鲜度检查出错: {e}", exc_info=True)
 
         return cached.get("flat_index", {}), False
 
+    async def _ensure_cache_fresh(self, event: AstrMessageEvent):
+        """确保缓存新鲜（event 版本，委派给 _ensure_cache_fresh_group）"""
+        return await self._ensure_cache_fresh_group(
+            int(event.get_group_id()), event.bot, self.plugin._is_llbot
+        )
+
     async def _ensure_fresh_mt(
-        self, cached: dict, payload: dict, int_group_id: int, call_action_fn
+        self,
+        cached: dict,
+        payload: dict,
+        int_group_id: int,
+        call_action_fn,
+        is_llbot: bool = False,
     ) -> tuple:
         """modify_time 模式的缓存验证"""
         group_id = str(int_group_id)
@@ -466,15 +493,17 @@ class CheckerManager:
             fid = f.get("file_id")
             if fid:
                 new_sig[fid] = f.get("modify_time")
+                fname = f.get("file_name", "")
                 cached["flat_index"][fid] = {
                     "file_id": fid,
-                    "file_name": f.get("file_name"),
+                    "file_name": fname,
                     "file_size": f.get("file_size"),
                     "modify_time": f.get("modify_time"),
                     "busid": f.get("busid"),
                     "uploader_name": f.get("uploader_name"),
                     "parent_folder_id": "/",
                     "parent_folder_name": "根目录",
+                    "relative_path": fname,
                 }
 
         # 移除根目录已删除的文件
@@ -513,7 +542,7 @@ class CheckerManager:
                 continue
             logger.debug(f"[{group_id}] 文件夹 {fname} 有变更，增量刷新")
             await self._sync_single_folder(
-                int_group_id, fid, call_action_fn, self.plugin._is_llbot, cached
+                int_group_id, fid, call_action_fn, is_llbot, cached
             )
             changed = True
 
@@ -538,7 +567,12 @@ class CheckerManager:
         return cached.get("flat_index", {}), changed
 
     async def _ensure_fresh_fallback(
-        self, cached: dict, payload: dict, int_group_id: int, call_action_fn
+        self,
+        cached: dict,
+        payload: dict,
+        int_group_id: int,
+        call_action_fn,
+        is_llbot: bool = False,
     ) -> tuple:
         """不支持 modify_time 的降级方案：沿用旧的 count + 签名对比"""
         group_id = str(int_group_id)
@@ -556,15 +590,17 @@ class CheckerManager:
             fid = f.get("file_id")
             if not fid:
                 continue
+            fname = f.get("file_name", "")
             cached["flat_index"][fid] = {
                 "file_id": fid,
-                "file_name": f.get("file_name"),
+                "file_name": fname,
                 "file_size": f.get("file_size"),
                 "modify_time": f.get("modify_time"),
                 "busid": f.get("busid"),
                 "uploader_name": f.get("uploader_name"),
                 "parent_folder_id": "/",
                 "parent_folder_name": "根目录",
+                "relative_path": fname,
             }
             if old_sig.get(fid) != new_sig.get(fid):
                 changed = True
@@ -594,7 +630,7 @@ class CheckerManager:
                     f"[{group_id}] 文件夹 {folder_name_map.get(fid, fid)} count 变化，增量刷新"
                 )
                 await self._sync_single_folder(
-                    int_group_id, fid, call_action_fn, self.plugin._is_llbot, cached
+                    int_group_id, fid, call_action_fn, is_llbot, cached
                 )
                 changed = True
 
@@ -613,7 +649,7 @@ class CheckerManager:
                     f"[{group_id}] 发现新文件夹 {folder_name_map.get(fid, fid)}，增量扫描"
                 )
                 await self._sync_single_folder(
-                    int_group_id, fid, call_action_fn, self.plugin._is_llbot, cached
+                    int_group_id, fid, call_action_fn, is_llbot, cached
                 )
                 changed = True
 

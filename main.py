@@ -117,6 +117,46 @@ class GroupFileCheckerPlugin(Star):
 
         logger.info("QQ 文件预览插件已加载。")
 
+    async def get_cached_file_listing(
+        self, group_id: int, client
+    ) -> Optional[Dict[str, dict]]:
+        """公开 API：获取群文件 flat_index 缓存（file_id → file_info）。
+
+        供其他插件调用，避免重复递归扫描。
+        - group_id: QQ 群号
+        - client: OneBot 客户端实例
+        返回 flat_index dict，失败时返回 None。
+        """
+        gid = str(group_id)
+        try:
+            await self._ensure_backend_detected(client)
+
+            # Phase 1: 快速检查，持有锁
+            async with self.checker._cache_lock:
+                is_cold = gid not in self.checker._cache
+                if is_cold:
+                    if await self.checker._load_cache_from_kv_for_group(gid):
+                        is_cold = False
+
+            # Phase 2: 全量扫描需释放锁，避免阻塞其他协程
+            if is_cold:
+                scan_result = await self.checker._do_full_scan_group(
+                    group_id, client, self._is_llbot
+                )
+                async with self.checker._cache_lock:
+                    if gid not in self.checker._cache:
+                        self.checker._cache[gid] = scan_result
+                return scan_result.get("flat_index", {})
+            else:
+                async with self.checker._cache_lock:
+                    await self.checker._ensure_cache_fresh_group(
+                        group_id, client, self._is_llbot
+                    )
+                    return self.checker._cache[gid].get("flat_index", {})
+        except Exception as e:
+            logger.error(f"[get_cached_file_listing] group={gid} 出错: {e}")
+            return None
+
     @filter.on_decorating_result()
     async def on_bot_sending_file(self, event: AstrMessageEvent):
         """发送消息前：净化 Bot 发送的文件名，并预复制文件到插件目录"""
