@@ -1170,6 +1170,24 @@ class CheckerManager:
             except Exception as e:
                 logger.error(f"[KV保存] 群组列表写入失败: {e}")
 
+    def _patch_relative_path(self, cache: dict):
+        if not isinstance(cache, dict):
+            return
+        flat_index = cache.get("flat_index")
+        if not isinstance(flat_index, dict):
+            return
+        for fid, info in flat_index.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("relative_path"):
+                continue
+            fname = info.get("file_name") or ""
+            pname = info.get("parent_folder_name") or "根目录"
+            if pname and pname != "根目录":
+                info["relative_path"] = f"{pname}/{fname}"
+            else:
+                info["relative_path"] = fname
+
     async def _load_cache_from_kv(self):
         try:
             group_ids = await self.plugin.get_kv_data(
@@ -1183,6 +1201,7 @@ class CheckerManager:
                         f"astrbot_plugin_file_checker_cache_{gid}", None
                     )
                     if data and isinstance(data, dict) and data.get("has_modify_time"):
+                        self._patch_relative_path(data)
                         self._cache[str(gid)] = data
                         logger.debug(
                             f"[KV加载] group={gid} 从 KV 恢复缓存 ({len(data.get('flat_index', {}))} 个文件)"
@@ -1198,6 +1217,7 @@ class CheckerManager:
                 f"astrbot_plugin_file_checker_cache_{group_id}", None
             )
             if data and isinstance(data, dict) and data.get("has_modify_time"):
+                self._patch_relative_path(data)
                 self._cache[group_id] = data
                 logger.debug(
                     f"[KV加载] group={group_id} 从 KV 恢复缓存 ({len(data.get('flat_index', {}))} 个文件)"

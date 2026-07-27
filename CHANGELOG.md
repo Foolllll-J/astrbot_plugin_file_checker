@@ -1,5 +1,9 @@
 # 📝 更新日志
 
+## v2.2.2 (2026-07-27)
+
+* 修复 公开缓存接口返回的 flat_index 中 `relative_path` 可能缺失的问题
+
 ## v2.2.1 (2026-07-25)
 
 * 新增 get_cached_file_listing 公共 API，供外部插件获取群文件缓存

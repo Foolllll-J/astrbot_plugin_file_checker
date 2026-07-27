@@ -152,6 +152,7 @@ class GroupFileCheckerPlugin(Star):
                     await self.checker._ensure_cache_fresh_group(
                         group_id, client, self._is_llbot
                     )
+                    self.checker._patch_relative_path(self.checker._cache[gid])
                     return self.checker._cache[gid].get("flat_index", {})
         except Exception as e:
             logger.error(f"[get_cached_file_listing] group={gid} 出错: {e}")
