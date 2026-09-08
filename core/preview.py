@@ -1,9 +1,10 @@
 import os
 import asyncio
+import shutil
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import List, Optional
-import time
 import chardet
 import subprocess
 import re
@@ -144,8 +145,7 @@ class PreviewManager:
         default_zip_password = preview_config.get("default_zip_password", "")
         preview_length = preview_config.get("preview_length", 500)
 
-        extract_path = os.path.join(self.temp_dir, f"extract_{int(time.time())}")
-        os.makedirs(extract_path, exist_ok=True)
+        extract_path = tempfile.mkdtemp(prefix="extract_", dir=self.temp_dir)
 
         archive_type = "压缩包"
         if file_name.lower().endswith(".zip"):
@@ -268,14 +268,17 @@ class PreviewManager:
                 if target_file.lower().endswith(".pdf"):
                     # PDF 需要返回文件路径供外层生成图片预览
                     # 复制 PDF 到临时目录根目录，避免被 finally 清理
-                    import shutil
-
-                    pdf_temp_path = os.path.join(
-                        self.temp_dir, f"temp_pdf_{int(time.time())}.pdf"
+                    fd, pdf_temp_path = tempfile.mkstemp(
+                        prefix="temp_pdf_", suffix=".pdf", dir=self.temp_dir
                     )
+                    os.close(fd)
                     try:
                         shutil.copy2(target_file, pdf_temp_path)
                     except Exception as e:
+                        try:
+                            os.remove(pdf_temp_path)
+                        except OSError:
+                            pass
                         logger.error(f"复制 PDF 文件失败: {e}", exc_info=True)
                         return "", "PDF 文件处理失败"
                     # 格式：PDF_PATH:<实际路径>，extra_info 也包含解压信息
@@ -304,12 +307,7 @@ class PreviewManager:
         finally:
             if extract_path and os.path.exists(extract_path):
                 try:
-                    for root, dirs, files in os.walk(extract_path, topdown=False):
-                        for name in files:
-                            os.remove(os.path.join(root, name))
-                        for name in dirs:
-                            os.rmdir(os.path.join(root, name))
-                    os.rmdir(extract_path)
+                    shutil.rmtree(extract_path)
                     logger.debug(f"已清理压缩包解压临时目录: {extract_path}")
                 except Exception as e:
                     logger.warning(f"删除临时文件夹 {extract_path} 失败: {e}")
@@ -546,23 +544,39 @@ class PreviewManager:
         pdf_preview_pages = preview_config.get("pdf_preview_pages", 0)
 
         image_paths = []
+        pdf = None
         try:
             pdf = pdfium.PdfDocument(file_path)
             num_pages = len(pdf)
             pages_to_render = min(num_pages, pdf_preview_pages)
 
             for i in range(pages_to_render):
-                page = pdf[i]
-                bitmap = page.render(scale=2)
-                image_path = os.path.join(
-                    self.temp_dir, f"pdf_preview_{int(time.time())}_{i}.png"
-                )
-                bitmap.to_pil().save(image_path)
-                image_paths.append(image_path)
-                page.close()  # 释放资源
-            pdf.close()  # 释放资源
+                page = None
+                image_path = None
+                try:
+                    page = pdf[i]
+                    bitmap = page.render(scale=2)
+                    fd, image_path = tempfile.mkstemp(
+                        prefix="pdf_preview_", suffix=".png", dir=self.temp_dir
+                    )
+                    os.close(fd)
+                    bitmap.to_pil().save(image_path)
+                    image_paths.append(image_path)
+                except Exception:
+                    if image_path:
+                        try:
+                            os.remove(image_path)
+                        except OSError:
+                            pass
+                    raise
+                finally:
+                    if page is not None:
+                        page.close()  # 释放资源
         except Exception as e:
             logger.error(f"生成 PDF 预览失败: {e}", exc_info=True)
+        finally:
+            if pdf is not None:
+                pdf.close()  # 释放资源
         return image_paths
 
     def send_pdf_preview(
@@ -590,12 +604,17 @@ class PreviewManager:
                 )
             )
 
-        yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
-        logger.info(
-            f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_images)} 页，包含文字通知)"
-        )
-
-        # 清理临时图
-        for img in pdf_preview_images:
-            if os.path.exists(img):
-                os.remove(img)
+        try:
+            yield event.chain_result([Comp.Nodes(nodes=pdf_preview_nodes)])
+            logger.info(
+                f"[{group_id}] ✅ PDF 预览已发送 ({len(pdf_preview_images)} 页，包含文字通知)"
+            )
+        finally:
+            # 无论消息发送成功、失败还是生成器被取消，都清理临时图
+            for img in pdf_preview_images:
+                try:
+                    os.remove(img)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning(f"[{group_id}] ⚠️ 删除 PDF 预览图失败 {img}: {e}")

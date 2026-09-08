@@ -1,5 +1,7 @@
 import asyncio
 import os
+import shutil
+import tempfile
 from typing import List, Dict, Optional
 import time
 
@@ -21,6 +23,9 @@ from .core.utils import (
 )
 from .core.checker import CheckerManager
 from .core.preview import PreviewManager
+
+
+TEMP_ENTRY_RETENTION_SECONDS = 24 * 60 * 60
 
 
 class GroupFileCheckerPlugin(Star):
@@ -102,6 +107,7 @@ class GroupFileCheckerPlugin(Star):
             StarTools.get_data_dir("astrbot_plugin_file_checker"), "temp"
         )
         os.makedirs(self.temp_dir, exist_ok=True)
+        self._cleanup_stale_temp_entries()
 
         # 文件检查间隔控制
         self.check_interval = 0.3
@@ -116,6 +122,74 @@ class GroupFileCheckerPlugin(Star):
         asyncio.create_task(self.checker._load_cache_from_kv())
 
         logger.info("QQ 文件预览插件已加载。")
+
+    def _cleanup_stale_temp_entries(self) -> None:
+        """清理上次进程遗留且已超过保留时间的临时文件。"""
+        cutoff = time.time() - TEMP_ENTRY_RETENTION_SECONDS
+        removed_count = 0
+
+        try:
+            with os.scandir(self.temp_dir) as entries:
+                for entry in entries:
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            shutil.rmtree(entry.path)
+                        else:
+                            os.remove(entry.path)
+                        removed_count += 1
+                    except FileNotFoundError:
+                        continue
+                    except OSError as e:
+                        logger.warning(f"清理过期临时文件失败 {entry.path}: {e}")
+        except OSError as e:
+            logger.warning(f"扫描临时目录失败 {self.temp_dir}: {e}")
+
+        if removed_count:
+            logger.info(f"启动时清理了 {removed_count} 个过期临时文件/目录")
+
+    def _remove_temp_path(self, path: Optional[str], group_id: Optional[int] = None) -> None:
+        """安全删除插件临时目录下的文件或目录。"""
+        if not path:
+            return
+
+        try:
+            temp_root = os.path.realpath(self.temp_dir)
+            target = os.path.realpath(path)
+            if os.path.commonpath([temp_root, target]) != temp_root:
+                logger.warning(f"拒绝删除临时目录外的路径: {path}")
+                return
+        except ValueError:
+            logger.warning(f"拒绝删除无法校验的临时路径: {path}")
+            return
+
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            if group_id is not None:
+                logger.debug(f"[{group_id}] 🗑️ 已清理临时路径: {path}")
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            prefix = f"[{group_id}] " if group_id is not None else ""
+            logger.warning(f"{prefix}删除临时路径失败 {path}: {e}")
+
+    def _copy_to_temp_dir(self, source_path: str, file_name: str) -> str:
+        """将源文件复制到插件临时目录并返回唯一临时路径。"""
+        suffix = os.path.splitext(os.path.basename(file_name))[1]
+        fd, local_path = tempfile.mkstemp(
+            prefix="file_", suffix=suffix, dir=self.temp_dir
+        )
+        os.close(fd)
+        try:
+            shutil.copy2(source_path, local_path)
+        except Exception:
+            self._remove_temp_path(local_path)
+            raise
+        return local_path
 
     async def get_cached_file_listing(
         self, group_id: int, client
@@ -194,12 +268,7 @@ class GroupFileCheckerPlugin(Star):
 
                 # 预复制文件到插件目录，供发送后钩子使用（对齐用户文件的下载流程）
                 if comp.file and os.path.exists(comp.file):
-                    import shutil
-
-                    local_path = os.path.join(self.temp_dir, comp.name)
-                    if os.path.exists(local_path):
-                        os.remove(local_path)
-                    shutil.copy2(comp.file, local_path)
+                    local_path = self._copy_to_temp_dir(comp.file, comp.name)
                     event.set_extra("_bot_file_local_path", local_path)
                     logger.debug(
                         f"[{group_id}] Bot 文件已预复制到插件目录: {local_path}"
@@ -207,17 +276,33 @@ class GroupFileCheckerPlugin(Star):
 
     @filter.after_message_sent()
     async def on_bot_file_sent(self, event: AstrMessageEvent):
+        """发送消息后处理 Bot 文件，并兜底清理异常流程留下的副本。"""
+        try:
+            await self._on_bot_file_sent_impl(event)
+        except Exception:
+            self._remove_temp_path(
+                event.get_extra("_bot_file_local_path"), int(event.get_group_id())
+            )
+            raise
+
+    async def _on_bot_file_sent_impl(self, event: AstrMessageEvent):
         """发送消息后：启动 Bot 文件的检查流程（和 on_group_message 对齐）"""
         if not event.get_extra("_is_bot_sent_file"):
             return
 
         if event.get_extra("_is_repack_file"):
             logger.debug(f"[{event.get_group_id()}] 补档文件，跳过检查流程")
+            self._remove_temp_path(
+                event.get_extra("_bot_file_local_path"), int(event.get_group_id())
+            )
             return
         group_id = str(event.get_group_id())
 
         result = event.get_result()
         if not result or not result.chain:
+            self._remove_temp_path(
+                event.get_extra("_bot_file_local_path"), int(group_id)
+            )
             return
         check_config = get_group_config(self.config, group_id, "check_module")
         preview_config = get_group_config(self.config, group_id, "preview_module")
@@ -275,6 +360,9 @@ class GroupFileCheckerPlugin(Star):
                                     file_id=new_file_id,
                                 )
                             )
+                        self._remove_temp_path(
+                            event.get_extra("_bot_file_local_path"), int(group_id)
+                        )
                         return
 
                 # 搜索 file_id（缓存已刷新，优先命中）
@@ -283,6 +371,9 @@ class GroupFileCheckerPlugin(Star):
                 )
                 if not file_id:
                     logger.warning(f"[{group_id}] Bot 文件未找到: {file_name}")
+                    self._remove_temp_path(
+                        event.get_extra("_bot_file_local_path"), int(group_id)
+                    )
                     continue
 
                 local_path = event.get_extra("_bot_file_local_path")
@@ -518,7 +609,7 @@ class GroupFileCheckerPlugin(Star):
         if count == 1:
             f = existing_files[0]
             msg = (
-                f"💡 提醒：您发送的文件「{file_name}」可能与群文件中的「{f.get('file_name')}」重复。\n"
+                f"💡 提醒：文件「{file_name}」可能与群文件中的「{f.get('file_name')}」重复。\n"
                 f"  ↳ 上传者: {f.get('uploader_name', '未知')}\n"
                 f"  ↳ 修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get('modify_time', 0)))}\n"
                 f"  ↳ 所属文件夹: {f.get('parent_folder_name', '根目录')}"
@@ -529,7 +620,7 @@ class GroupFileCheckerPlugin(Star):
                 msg += f"\n\u200b\n此文件将在 {delete_delay // 60} 分钟后删除。"
             return msg
 
-        msg = f"💡 提醒：您发送的文件「{file_name}」可能与群文件中以下 {count} 个文件重复：\n"
+        msg = f"💡 提醒：文件「{file_name}」可能与群文件中以下 {count} 个文件重复：\n"
         for idx, f in enumerate(existing_files, 1):
             msg += (
                 f"\n{idx}. {f.get('file_name')}\n"
@@ -559,6 +650,54 @@ class GroupFileCheckerPlugin(Star):
         local_path: Optional[str] = None,
         is_bot_file: bool = False,
         target_msg_id: Optional[str] = None,
+    ):
+        """执行文件检查流程，并确保所有临时副本最终进入清理队列。"""
+        cleanup_state = {"path": local_path}
+        try:
+            async for result in self._handle_file_check_flow_impl(
+                event,
+                file_name,
+                file_id,
+                file_component,
+                file_size,
+                upload_time,
+                check_config,
+                preview_config,
+                repack_config,
+                backup_config,
+                local_path=local_path,
+                is_bot_file=is_bot_file,
+                target_msg_id=target_msg_id,
+                cleanup_state=cleanup_state,
+            ):
+                yield result
+        finally:
+            cleanup_path = cleanup_state["path"]
+            if cleanup_path:
+                cleanup_delay = check_config.get("check_delay_seconds", 300) * 2
+                asyncio.create_task(
+                    self._delayed_cleanup_local_path(
+                        cleanup_path, cleanup_delay, int(event.get_group_id())
+                    )
+                )
+
+    async def _handle_file_check_flow_impl(
+        self,
+        event: AstrMessageEvent,
+        file_name: str,
+        file_id: str,
+        file_component: Optional[Comp.File],
+        file_size: Optional[int],
+        upload_time: Optional[int],
+        check_config: dict,
+        preview_config: dict,
+        repack_config: dict,
+        backup_config: dict,
+        *,
+        local_path: Optional[str] = None,
+        is_bot_file: bool = False,
+        target_msg_id: Optional[str] = None,
+        cleanup_state: Optional[Dict[str, Optional[str]]] = None,
     ):
         group_id = int(event.get_group_id())
         sender_id = event.get_sender_id()
@@ -590,6 +729,8 @@ class GroupFileCheckerPlugin(Star):
             is_valid = retry_valid
 
         # 统一文件生命周期管理：集中判断、统一下载、统一清理
+        pdf_preview_file = None
+        pdf_preview_images = []
         try:
             # 1. 聚合判断是否需要下载文件
             needs_download = self._should_download_file(
@@ -601,14 +742,10 @@ class GroupFileCheckerPlugin(Star):
                 async with self.download_semaphore:
                     assert file_component is not None
                     framework_temp_path = await file_component.get_file()
-                # 复制到插件自己的 temp_dir，使用原始文件名，后续所有操作都针对此副本
-                import shutil
-
-                local_path = os.path.join(self.temp_dir, file_name)
-                # 如果已存在，覆盖
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-                shutil.copy2(framework_temp_path, local_path)
+                # 复制到插件自己的 temp_dir，使用唯一临时路径，避免并发任务互相覆盖
+                local_path = self._copy_to_temp_dir(framework_temp_path, file_name)
+                if cleanup_state is not None:
+                    cleanup_state["path"] = local_path
                 logger.debug(f"[{group_id}] 文件已复制到插件 temp_dir: {local_path}")
 
             # 3. 预览生成
@@ -625,9 +762,8 @@ class GroupFileCheckerPlugin(Star):
             )
 
             # 4. PDF 预览图生成
-            pdf_preview_images = []
             if preview_text.startswith("PDF_PATH:"):
-                # 压缩包内返回的 PDF 路径，需要清理
+                # 压缩包内返回的 PDF 路径，无论是否生成图片都需要清理
                 pdf_preview_file = preview_text[9:]  # 去掉 'PDF_PATH:' 前缀
                 preview_text = ""  # 清空预览文本
                 if (
@@ -641,14 +777,6 @@ class GroupFileCheckerPlugin(Star):
                         )
                     except Exception as e:
                         logger.error(f"PDF预览处理出错: {e}", exc_info=True)
-                    # 生成预览图后立即清理 PDF 临时文件
-                    try:
-                        os.remove(pdf_preview_file)
-                        logger.debug(
-                            f"[{group_id}] 🗑️ 已清理压缩包内 PDF 临时文件: {pdf_preview_file}"
-                        )
-                    except OSError as e:
-                        logger.warning(f"[{group_id}] ⚠️ 删除 PDF 临时文件失败: {e}")
             elif (
                 self.preview._is_pdf_file(file_name)
                 and preview_config.get("pdf_preview_pages", 0) > 0
@@ -762,13 +890,9 @@ class GroupFileCheckerPlugin(Star):
                     yield msg
 
         finally:
-            cleanup_delay = check_config.get("check_delay_seconds", 300) * 2
-            if local_path:
-                asyncio.create_task(
-                    self._delayed_cleanup_local_path(
-                        local_path, cleanup_delay, group_id
-                    )
-                )
+            self._remove_temp_path(pdf_preview_file, group_id)
+            for image_path in pdf_preview_images:
+                self._remove_temp_path(image_path, group_id)
 
     def _should_download_file(
         self,
@@ -850,12 +974,7 @@ class GroupFileCheckerPlugin(Star):
     ):
         """独立清理任务：等待指定时间后清理预检下载的本地文件"""
         await asyncio.sleep(delay)
-        if local_path and os.path.exists(local_path):
-            try:
-                os.remove(local_path)
-                logger.debug(f"[{group_id}] 🗑️ 已清理预检下载的本地文件: {local_path}")
-            except OSError as e:
-                logger.warning(f"[{group_id}] ⚠️ 删除临时文件失败: {e}")
+        self._remove_temp_path(local_path, group_id)
 
     async def terminate(self):
         await self.checker._save_cache_to_kv()

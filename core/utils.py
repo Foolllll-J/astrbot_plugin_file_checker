@@ -225,9 +225,9 @@ def build_notification_text(
     preview_length = preview_config.get("preview_length", 500)
 
     if is_success:
-        base_msg = f"✅ 您发送的文件「{file_name}」初步检查有效。"
+        base_msg = f"✅ 文件「{file_name}」初步检查有效。"
     else:
-        base_msg = f"⚠️ 您发送的文件「{file_name}」已失效。"
+        base_msg = f"⚠️ 文件「{file_name}」已失效。"
 
     # 如果有 extra_info，优先显示 extra_info
     if extra_info:

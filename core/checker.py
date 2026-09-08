@@ -3,6 +3,7 @@ import asyncio
 import time
 import subprocess
 import re
+import uuid
 from typing import List, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -810,7 +811,7 @@ class CheckerManager:
             base_name = os.path.splitext(original_filename)[0]
             new_zip_name = f"{base_name}.zip"
             repacked_file_path = os.path.join(
-                self.temp_dir, f"{int(time.time())}_{new_zip_name}"
+                self.temp_dir, f"{uuid.uuid4().hex}_{new_zip_name}"
             )
 
             # local_path 已是原始文件名，zip -j 取 basename 正确
@@ -1031,7 +1032,7 @@ class CheckerManager:
                 f"❌ [{group_id}] [阶段二] 文件 '{file_name}' 在延时复核时确认已失效!"
             )
             try:
-                failure_message = f"❌ 经 {check_delay_seconds} 秒后复核，您发送的文件「{file_name}」已失效。"
+                failure_message = f"❌ 经 {check_delay_seconds} 秒后复核，文件「{file_name}」已失效。"
                 await event.send(
                     MessageChain(
                         [Comp.Reply(id=target_msg_id), Comp.Plain(failure_message)]
