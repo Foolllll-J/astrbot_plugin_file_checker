@@ -20,6 +20,9 @@ from .core.utils import (
     build_notification_text,
     purify_file_name,
     backup_file_to_session,
+    detect_backend_type,
+    is_action_success,
+    format_seconds,
 )
 from .core.checker import CheckerManager
 from .core.preview import PreviewManager
@@ -32,8 +35,9 @@ class GroupFileCheckerPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict] = None):
         super().__init__(context)
         self.config = config if config else {}
-        self._is_llbot = False
+        self._backend_type = "napcat"
         self._backend_client_id: int | None = None
+        self._backend_detection_lock = asyncio.Lock()
 
         # 全局配置
         global_settings = self.config.get("global_settings", {})
@@ -215,7 +219,7 @@ class GroupFileCheckerPlugin(Star):
             # Phase 2: 全量扫描需释放锁，避免阻塞其他协程
             if is_cold:
                 scan_result = await self.checker._do_full_scan_group(
-                    group_id, client, self._is_llbot
+                    group_id, client, self._backend_type
                 )
                 async with self.checker._cache_lock:
                     if gid not in self.checker._cache:
@@ -224,7 +228,7 @@ class GroupFileCheckerPlugin(Star):
             else:
                 async with self.checker._cache_lock:
                     await self.checker._ensure_cache_fresh_group(
-                        group_id, client, self._is_llbot
+                        group_id, client, self._backend_type
                     )
                     self.checker._patch_relative_path(self.checker._cache[gid])
                     return self.checker._cache[gid].get("flat_index", {})
@@ -411,23 +415,22 @@ class GroupFileCheckerPlugin(Star):
         if self._backend_client_id == client_id:
             return
 
-        self._backend_client_id = client_id
-        self._is_llbot = False
+        async with self._backend_detection_lock:
+            if self._backend_client_id == client_id:
+                return
 
-        try:
-            version_info = await client.api.call_action("get_version_info")
-            app_name = None
-            if isinstance(version_info, dict):
-                app_name = version_info.get("app_name")
-                if app_name is None and isinstance(version_info.get("data"), dict):
-                    app_name = version_info["data"].get("app_name")
-            self._is_llbot = app_name == "LLOneBot"
-            logger.debug(
-                f"[file_checker] 懒探测协议端结果: app_name={app_name or 'unknown'}, "
-                f"backend={'llbot' if self._is_llbot else 'napcat'}"
-            )
-        except Exception as e:
-            logger.warning(f"[file_checker] 懒探测协议端失败，默认按 NapCat 处理: {e}")
+            try:
+                self._backend_type, app_name = await detect_backend_type(client)
+                logger.debug(
+                    f"[file_checker] 懒探测协议端结果: app_name={app_name or 'unknown'}, "
+                    f"backend={self._backend_type}"
+                )
+            except Exception as e:
+                self._backend_type = "napcat"
+                logger.warning(
+                    f"[file_checker] 懒探测协议端失败，默认按 NapCat 处理: {e}"
+                )
+            self._backend_client_id = client_id
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
@@ -482,11 +485,7 @@ class GroupFileCheckerPlugin(Star):
                                     current_parent_directory=current_parent,
                                     new_name=purified_file_name,
                                 )
-                                if (
-                                    self._is_llbot
-                                    and isinstance(rename_result, dict)
-                                    and rename_result.get("status") == "failed"
-                                ):
+                                if not is_action_success(rename_result):
                                     raise RuntimeError(
                                         rename_result.get("wording")
                                         or "rename_group_file failed"
@@ -617,7 +616,7 @@ class GroupFileCheckerPlugin(Star):
             if strategy == "delete_old":
                 msg += "\n\u200b\n该旧文件将被自动清理。"
             elif strategy == "delete_new":
-                msg += f"\n\u200b\n此文件将在 {delete_delay // 60} 分钟后删除。"
+                msg += f"\n\u200b\n此文件将在 {format_seconds(delete_delay)}后删除。"
             return msg
 
         msg = f"💡 提醒：文件「{file_name}」可能与群文件中以下 {count} 个文件重复：\n"
@@ -631,7 +630,7 @@ class GroupFileCheckerPlugin(Star):
         if strategy == "delete_old":
             msg += f"\n\u200b\n以上 {count} 个旧文件将被自动清理。"
         elif strategy == "delete_new":
-            msg += f"\n\u200b\n此文件将在 {delete_delay // 60} 分钟后删除。"
+            msg += f"\n\u200b\n此文件将在 {format_seconds(delete_delay)}后删除。"
         return msg
 
     async def _handle_file_check_flow(

@@ -13,6 +13,62 @@ logger = logging.getLogger("astrbot")
 DEFAULT_BACKUP_SEND_TIMEOUT_SECONDS = 90
 
 
+def format_seconds(seconds: int) -> str:
+    """格式化延时文案：整分钟时使用分钟，否则保留秒。"""
+    if seconds > 0 and seconds % 60 == 0:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
+
+
+async def detect_backend_type(client) -> tuple[str, str | None]:
+    """探测 OneBot 协议端，返回后端类型和 app_name。"""
+    if client is None or not hasattr(client, "api"):
+        return "napcat", None
+
+    version_info = await client.api.call_action("get_version_info")
+    app_name = None
+    if isinstance(version_info, dict):
+        app_name = version_info.get("app_name")
+        if app_name is None and isinstance(version_info.get("data"), dict):
+            app_name = version_info["data"].get("app_name")
+
+    normalized_app_name = str(app_name or "").strip().lower()
+    if normalized_app_name == "llonebot":
+        backend_type = "llbot"
+    elif normalized_app_name == "snowluma":
+        backend_type = "snowluma"
+    else:
+        backend_type = "napcat"
+    return backend_type, app_name
+
+
+def is_action_success(result) -> bool:
+    """兼容标准 OneBot 与旧协议端的动作成功响应。"""
+    if result is None:
+        return True
+    if not isinstance(result, dict):
+        return False
+
+    status = str(result.get("status", "")).strip().lower()
+    if status in {"failed", "error"}:
+        return False
+
+    retcode = result.get("retcode")
+    if retcode is not None and str(retcode) != "0":
+        return False
+
+    legacy_result = result.get("transGroupFileResult")
+    if isinstance(legacy_result, dict):
+        legacy_result = legacy_result.get("result")
+    legacy_retcode = (
+        legacy_result.get("retCode") if isinstance(legacy_result, dict) else None
+    )
+    if legacy_retcode is not None and str(legacy_retcode) != "0":
+        return False
+
+    return True
+
+
 async def is_msg_still_available(event: AstrMessageEvent, msg_id: str) -> bool:
     """校验消息是否仍可获取"""
     if not msg_id or not isinstance(event, AiocqhttpMessageEvent):

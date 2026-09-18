@@ -4,6 +4,7 @@ import time
 import subprocess
 import re
 import uuid
+import shutil
 from typing import List, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -19,6 +20,8 @@ from .utils import (
     get_group_config,
     build_notification_text,
     backup_file_to_session,
+    is_action_success,
+    format_seconds,
 )
 
 
@@ -60,15 +63,22 @@ def _is_ob11_action_success(result) -> bool:
 
 
 def _is_llbot_action_success(result) -> bool:
-    if result is None:
-        return True
-    if not isinstance(result, dict):
-        return False
-    if _is_ob11_action_success(result):
-        return True
-    if result.get("status") == "failed":
-        return False
-    return True
+    return is_action_success(result)
+
+
+def _needs_legacy_file_count(backend_type) -> bool:
+    """NapCat/未知协议端需要旧版 file_count，LLBot 和 SnowLuma 不需要。"""
+    if isinstance(backend_type, bool):
+        return not backend_type
+    return str(backend_type).strip().lower() not in {"llbot", "snowluma"}
+
+
+def _get_plugin_backend_type(plugin) -> str:
+    """读取新后端类型，并兼容旧调用方提供的 _is_llbot 字段。"""
+    backend_type = getattr(plugin, "_backend_type", None)
+    if backend_type:
+        return backend_type
+    return "llbot" if getattr(plugin, "_is_llbot", False) else "napcat"
 
 
 class CheckerManager:
@@ -93,28 +103,13 @@ class CheckerManager:
             delete_result = await client.api.call_action(
                 "delete_group_file", group_id=group_id, file_id=file_id
             )
-            if self.plugin._is_llbot:
-                if _is_llbot_action_success(delete_result):
-                    logger.info(f"[{group_id}] ✅ 成功删除群文件: {file_name}")
-                    return True
-                else:
-                    logger.warning(
-                        f"[{group_id}] ⚠️ LLBot 删除群文件失败: {file_name}, "
-                        f"返回={delete_result}"
-                    )
-                    return False
-            elif (
-                delete_result
-                and delete_result.get("transGroupFileResult", {})
-                .get("result", {})
-                .get("retCode")
-                == 0
-            ):
+            if is_action_success(delete_result):
                 logger.info(f"[{group_id}] ✅ 成功删除群文件: {file_name}")
                 return True
-            else:
-                logger.warning(f"[{group_id}] ⚠️ 删除群文件失败: {file_name}")
-                return False
+            logger.warning(
+                f"[{group_id}] ⚠️ 删除群文件失败: {file_name}, 返回={delete_result}"
+            )
+            return False
         except Exception as e:
             logger.error(f"[{group_id}] ❌ 删除群文件时发生错误: {e}", exc_info=True)
             return False
@@ -170,19 +165,34 @@ class CheckerManager:
         )
         return fid
 
-    def _detect_modify_time_support(self, payload: dict) -> bool:
-        folders = payload.get("folders", [])
-        return bool(folders and folders[0].get("modify_time", 0) > 0)
+    @staticmethod
+    def _get_folder_modify_time(folder_info: dict, backend_type: str = "") -> int:
+        """获取文件夹级变更时间；SnowLuma 用 last_upload_time 表示该字段。"""
+        modify_time = folder_info.get("modify_time")
+        if modify_time:
+            return modify_time
+        if str(backend_type).strip().lower() == "snowluma":
+            return folder_info.get("last_upload_time", 0) or 0
+        return 0
 
-    def _calc_root_modify_time(self, payload: dict) -> int:
+    def _detect_modify_time_support(
+        self, payload: dict, backend_type: str = ""
+    ) -> bool:
+        folders = payload.get("folders", [])
+        return any(
+            self._get_folder_modify_time(folder, backend_type) > 0
+            for folder in folders
+        )
+
+    def _calc_root_modify_time(self, payload: dict, backend_type: str = "") -> int:
         mt = 0
         for f in payload.get("files", []):
             mt = max(mt, f.get("modify_time", 0) or 0)
         for fol in payload.get("folders", []):
-            mt = max(mt, fol.get("modify_time", 0) or 0)
+            mt = max(mt, self._get_folder_modify_time(fol, backend_type))
         return mt
 
-    async def _do_full_scan_group(self, group_id: int, client, is_llbot: bool) -> dict:
+    async def _do_full_scan_group(self, group_id: int, client, backend_type: str) -> dict:
         """全量扫描所有文件夹，返回完整的缓存数据（client 版本，供外部/内部共用）"""
         gid = str(group_id)
 
@@ -213,18 +223,18 @@ class CheckerManager:
                     if first_root_result is None:
                         first_root_result = result
                 else:
-                    if is_llbot:
+                    if _needs_legacy_file_count(backend_type):
                         result = await client.api.call_action(
                             "get_group_files_by_folder",
                             group_id=group_id,
                             folder_id=cur_id,
+                            file_count=1000,
                         )
                     else:
                         result = await client.api.call_action(
                             "get_group_files_by_folder",
                             group_id=group_id,
                             folder_id=cur_id,
-                            file_count=1000,
                         )
 
                 payload = _normalize_action_payload(result)
@@ -235,8 +245,12 @@ class CheckerManager:
                     continue
 
                 if cur_id == "/":
-                    has_modify_time = self._detect_modify_time_support(payload)
-                    root_modify_time = self._calc_root_modify_time(payload)
+                    has_modify_time = self._detect_modify_time_support(
+                        payload, backend_type
+                    )
+                    root_modify_time = self._calc_root_modify_time(
+                        payload, backend_type
+                    )
 
                 for file_info in payload.get("files", []):
                     fid = file_info.get("file_id")
@@ -277,7 +291,9 @@ class CheckerManager:
                         )
                         folders_info[sub_id] = {
                             "folder_name": folder_info.get("folder_name"),
-                            "modify_time": folder_info.get("modify_time", 0) or 0,
+                            "modify_time": self._get_folder_modify_time(
+                                folder_info, backend_type
+                            ),
                             "total_file_count": folder_info.get("total_file_count", 0),
                         }
 
@@ -309,11 +325,11 @@ class CheckerManager:
     async def _do_full_scan(self, event: AstrMessageEvent) -> dict:
         """全量扫描（event 版本，委派给 _do_full_scan_group）"""
         return await self._do_full_scan_group(
-            int(event.get_group_id()), event.bot, self.plugin._is_llbot
+            int(event.get_group_id()), event.bot, _get_plugin_backend_type(self.plugin)
         )
 
     async def _sync_single_folder(
-        self, group_id: int, folder_id: str, call_action, is_llbot: bool, cached: dict
+        self, group_id: int, folder_id: str, call_action, backend_type: str, cached: dict
     ):
         """增量刷新单个文件夹的缓存"""
         gid = str(group_id)
@@ -326,18 +342,18 @@ class CheckerManager:
             if folder_id == "/":
                 result = await call_action("get_group_root_files", group_id=group_id)
             else:
-                if is_llbot:
+                if _needs_legacy_file_count(backend_type):
                     result = await call_action(
                         "get_group_files_by_folder",
                         group_id=group_id,
                         folder_id=folder_id,
+                        file_count=1000,
                     )
                 else:
                     result = await call_action(
                         "get_group_files_by_folder",
                         group_id=group_id,
                         folder_id=folder_id,
-                        file_count=1000,
                     )
 
             payload = _normalize_action_payload(result)
@@ -409,7 +425,9 @@ class CheckerManager:
                         if "folders" in cached:
                             cached["folders"][sub_id] = {
                                 "folder_name": folder_info.get("folder_name"),
-                                "modify_time": folder_info.get("modify_time", 0) or 0,
+                                "modify_time": self._get_folder_modify_time(
+                                    folder_info, backend_type
+                                ),
                                 "total_file_count": folder_info.get(
                                     "total_file_count", 0
                                 ),
@@ -427,7 +445,7 @@ class CheckerManager:
             )
 
     async def _ensure_cache_fresh_group(
-        self, group_id: int, client, is_llbot: bool
+        self, group_id: int, client, backend_type: str
     ) -> tuple:
         """
         确保缓存新鲜（client 版本，供外部/内部共用）。
@@ -452,15 +470,15 @@ class CheckerManager:
             if not isinstance(payload, dict):
                 return cached.get("flat_index", {}), False
 
-            has_mt = self._detect_modify_time_support(payload)
+            has_mt = self._detect_modify_time_support(payload, backend_type)
 
             if has_mt:
                 return await self._ensure_fresh_mt(
-                    cached, payload, group_id, call_action_fn, is_llbot
+                    cached, payload, group_id, call_action_fn, backend_type
                 )
             else:
                 return await self._ensure_fresh_fallback(
-                    cached, payload, group_id, call_action_fn, is_llbot
+                    cached, payload, group_id, call_action_fn, backend_type
                 )
 
         except Exception as e:
@@ -471,7 +489,7 @@ class CheckerManager:
     async def _ensure_cache_fresh(self, event: AstrMessageEvent):
         """确保缓存新鲜（event 版本，委派给 _ensure_cache_fresh_group）"""
         return await self._ensure_cache_fresh_group(
-            int(event.get_group_id()), event.bot, self.plugin._is_llbot
+            int(event.get_group_id()), event.bot, _get_plugin_backend_type(self.plugin)
         )
 
     async def _ensure_fresh_mt(
@@ -480,12 +498,12 @@ class CheckerManager:
         payload: dict,
         int_group_id: int,
         call_action_fn,
-        is_llbot: bool = False,
+        backend_type: str = "napcat",
     ) -> tuple:
         """modify_time 模式的缓存验证"""
         group_id = str(int_group_id)
 
-        new_root_mt = self._calc_root_modify_time(payload)
+        new_root_mt = self._calc_root_modify_time(payload, backend_type)
 
         # 更新 root_files_sig 和 flat_index 中的根目录文件
         old_sig = cached.get("root_files_sig", {})
@@ -524,7 +542,7 @@ class CheckerManager:
             fid = fol.get("folder_id")
             if not fid:
                 continue
-            folder_mt = fol.get("modify_time", 0) or 0
+            folder_mt = self._get_folder_modify_time(fol, backend_type)
             fcount = fol.get("total_file_count", 0)
             fname = fol.get("folder_name")
             new_folders[fid] = {
@@ -543,7 +561,7 @@ class CheckerManager:
                 continue
             logger.debug(f"[{group_id}] 文件夹 {fname} 有变更，增量刷新")
             await self._sync_single_folder(
-                int_group_id, fid, call_action_fn, is_llbot, cached
+                int_group_id, fid, call_action_fn, backend_type, cached
             )
             changed = True
 
@@ -573,7 +591,7 @@ class CheckerManager:
         payload: dict,
         int_group_id: int,
         call_action_fn,
-        is_llbot: bool = False,
+        backend_type: str = "napcat",
     ) -> tuple:
         """不支持 modify_time 的降级方案：沿用旧的 count + 签名对比"""
         group_id = str(int_group_id)
@@ -631,7 +649,7 @@ class CheckerManager:
                     f"[{group_id}] 文件夹 {folder_name_map.get(fid, fid)} count 变化，增量刷新"
                 )
                 await self._sync_single_folder(
-                    int_group_id, fid, call_action_fn, is_llbot, cached
+                    int_group_id, fid, call_action_fn, backend_type, cached
                 )
                 changed = True
 
@@ -650,7 +668,7 @@ class CheckerManager:
                     f"[{group_id}] 发现新文件夹 {folder_name_map.get(fid, fid)}，增量扫描"
                 )
                 await self._sync_single_folder(
-                    int_group_id, fid, call_action_fn, is_llbot, cached
+                    int_group_id, fid, call_action_fn, backend_type, cached
                 )
                 changed = True
 
@@ -781,8 +799,8 @@ class CheckerManager:
             repack_config = {}
         repack_zip_password = repack_config.get("repack_zip_password", "")
 
-        base_name = os.path.basename(original_filename)
-        if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', base_name):
+        original_file_name = os.path.basename(original_filename)
+        if re.search(r'[\\/|*<>;"\x00-\x1F\x7F]', original_file_name):
             logger.error(
                 f"文件名 '{original_filename}' 包含非安全字符，已跳过重新打包。"
             )
@@ -805,6 +823,7 @@ class CheckerManager:
             return
 
         repacked_file_path = None
+        repack_source_dir = None
         try:
             logger.debug(f"开始为失效文件 {original_filename} 进行重新打包...")
 
@@ -814,8 +833,15 @@ class CheckerManager:
                 self.temp_dir, f"{uuid.uuid4().hex}_{new_zip_name}"
             )
 
-            # local_path 已是原始文件名，zip -j 取 basename 正确
-            command = ["zip", "-j", repacked_file_path, local_path]
+            # 独立临时目录并恢复原文件名，避免 ZIP 内部条目使用临时文件名。
+            repack_source_dir = os.path.join(
+                self.temp_dir, f"repack_source_{uuid.uuid4().hex}"
+            )
+            os.makedirs(repack_source_dir, exist_ok=False)
+            repack_source_path = os.path.join(repack_source_dir, original_file_name)
+            shutil.copy2(local_path, repack_source_path)
+
+            command = ["zip", "-j", repacked_file_path, repack_source_path]
             if repack_zip_password:
                 command.extend(["-P", repack_zip_password])
 
@@ -838,7 +864,10 @@ class CheckerManager:
 
             logger.debug(f"文件已重新打包至 {repacked_file_path}，准备发送...")
 
-            reply_text = "已为您重新打包为ZIP文件发送："
+            reply_text = "已重新打包为 ZIP 文件"
+            if repack_zip_password:
+                reply_text += f"（密码：{repack_zip_password}）"
+            reply_text += "发送："
             file_component_to_send = Comp.File(
                 file=repacked_file_path, name=new_zip_name
             )
@@ -923,6 +952,8 @@ class CheckerManager:
                 ]
             )
         finally:
+            if repack_source_dir and os.path.exists(repack_source_dir):
+                shutil.rmtree(repack_source_dir, ignore_errors=True)
             if repacked_file_path and os.path.exists(repacked_file_path):
 
                 async def cleanup_file(path: str):
@@ -1032,7 +1063,10 @@ class CheckerManager:
                 f"❌ [{group_id}] [阶段二] 文件 '{file_name}' 在延时复核时确认已失效!"
             )
             try:
-                failure_message = f"❌ 经 {check_delay_seconds} 秒后复核，文件「{file_name}」已失效。"
+                failure_message = (
+                    f"❌ 经 {format_seconds(check_delay_seconds)}后复核，"
+                    f"文件「{file_name}」已失效。"
+                )
                 await event.send(
                     MessageChain(
                         [Comp.Reply(id=target_msg_id), Comp.Plain(failure_message)]
