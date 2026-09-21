@@ -1,14 +1,12 @@
 import asyncio
-import logging
 import re
 import os
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 import astrbot.api.message_components as Comp
-
-logger = logging.getLogger("astrbot")
 
 DEFAULT_BACKUP_SEND_TIMEOUT_SECONDS = 90
 
